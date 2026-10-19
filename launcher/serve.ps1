@@ -62,117 +62,6 @@ function Update-Library {
   }
 }
 
-# ---------------------------------------------------------------- password-protected library
-# library\library.enc is published on GitHub; only people with the password can open it.
-# Format: see tools\encrypt-library.mjs.
-
-$EncryptedLibrary = Join-Path $ProjectRoot 'library\library.enc'
-$LibrarySourceMark = Join-Path $AppRoot 'data\library.source'
-$SavedPasswordFile = Join-Path $ProjectRoot 'data\library.password'
-$PasswordAttempts = 3
-
-function Get-Sha256Hex([byte[]]$bytes) {
-  $sha = [System.Security.Cryptography.SHA256]::Create()
-  try { return -join ($sha.ComputeHash($bytes) | ForEach-Object { $_.ToString('x2') }) }
-  finally { $sha.Dispose() }
-}
-
-function Test-BytesEqual([byte[]]$a, [byte[]]$b) {
-  # Constant time: every byte is compared even after a difference.
-  if ($a.Length -ne $b.Length) { return $false }
-  $diff = 0
-  for ($i = 0; $i -lt $a.Length; $i++) { $diff = $diff -bor ($a[$i] -bxor $b[$i]) }
-  return $diff -eq 0
-}
-
-function Expand-Library([byte[]]$data, [string]$password) {
-  # Returns the gzip-compressed JSON, or $null when the password is wrong or the file is damaged.
-  $magic = [System.Text.Encoding]::ASCII.GetBytes('ADLIB1')
-  $headerLength = $magic.Length + 4 + 16 + 16
-  if ($data.Length -lt $headerLength + 32 -or -not (Test-BytesEqual $data[0..5] $magic)) {
-    throw 'library.enc is not an Anisong Dungeon library.'
-  }
-  $iterations = ([int]$data[6] -shl 24) -bor ([int]$data[7] -shl 16) -bor ([int]$data[8] -shl 8) -bor [int]$data[9]
-  $salt = [byte[]]$data[10..25]
-  $iv = [byte[]]$data[26..41]
-  $macStart = $data.Length - 32
-
-  $derive = New-Object System.Security.Cryptography.Rfc2898DeriveBytes(
-    [System.Text.Encoding]::UTF8.GetBytes($password), $salt, $iterations,
-    [System.Security.Cryptography.HashAlgorithmName]::SHA256)
-  $keys = $derive.GetBytes(64)
-  $derive.Dispose()
-
-  $hmac = New-Object System.Security.Cryptography.HMACSHA256(, [byte[]]$keys[32..63])
-  $expected = $hmac.ComputeHash($data, 0, $macStart)
-  $hmac.Dispose()
-  if (-not (Test-BytesEqual $expected ([byte[]]$data[$macStart..($data.Length - 1)]))) { return $null }
-
-  $aes = [System.Security.Cryptography.Aes]::Create()
-  try {
-    $aes.Mode = 'CBC'
-    $aes.Padding = 'PKCS7'
-    $decryptor = $aes.CreateDecryptor([byte[]]$keys[0..31], $iv)
-    return $decryptor.TransformFinalBlock($data, $headerLength, $macStart - $headerLength)
-  }
-  finally { $aes.Dispose() }
-}
-
-function Save-Gunzipped([byte[]]$compressed, [string]$path) {
-  $source = New-Object System.IO.MemoryStream(, $compressed)
-  $gzip = New-Object System.IO.Compression.GZipStream($source, [System.IO.Compression.CompressionMode]::Decompress)
-  $output = [System.IO.File]::Create($path)
-  try { $gzip.CopyTo($output) }
-  finally { $output.Dispose(); $gzip.Dispose(); $source.Dispose() }
-}
-
-function Read-LibraryPassword {
-  $secure = Read-Host '  Song library password (Enter to skip)' -AsSecureString
-  $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
-  try { return [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr) }
-  finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) }
-}
-
-function Unlock-Library {
-  # Decrypts library.enc into app\data\library.json when it changed since the last unlock.
-  if (-not (Test-Path $EncryptedLibrary)) { return }
-  $data = [System.IO.File]::ReadAllBytes($EncryptedLibrary)
-  $hash = Get-Sha256Hex $data
-  $isCurrent = (Test-Path $LibraryJson) -and (Test-Path $LibrarySourceMark) -and
-    ((Get-Content -Raw $LibrarySourceMark).Trim() -eq $hash)
-  if ($isCurrent) { return }
-
-  $hadLibrary = Test-Path $LibraryJson
-  Write-Host ''
-  Write-Host $(if ($hadLibrary) { '  A new song library is available.' } else { '  This game includes a password-protected song library.' })
-  $saved = if (Test-Path $SavedPasswordFile) { (Get-Content -Raw $SavedPasswordFile).Trim() } else { '' }
-  for ($attempt = 0; $attempt -lt $PasswordAttempts; $attempt++) {
-    $typed = -not ($saved -and $attempt -eq 0)
-    $password = if ($typed) { Read-LibraryPassword } else { $saved }
-    if (-not $password) { break }
-    Write-Host '  Unlocking...'
-    $compressed = Expand-Library $data $password
-    if ($null -eq $compressed) {
-      Write-Host '  Wrong password.'
-      continue
-    }
-    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $LibraryJson) | Out-Null
-    Save-Gunzipped $compressed $LibraryJson
-    Set-Content -Path $LibrarySourceMark -Value $hash -Encoding ascii
-    Write-Host '  Song library unlocked.'
-    if ($typed -and $password -ne $saved) {
-      $answer = Read-Host '  Remember this password on this PC? [Y/n]'
-      if ([string]::IsNullOrWhiteSpace($answer) -or $answer.Trim().ToLowerInvariant().StartsWith('y')) {
-        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $SavedPasswordFile) | Out-Null
-        Set-Content -Path $SavedPasswordFile -Value $password -Encoding utf8
-      }
-    }
-    return
-  }
-  if ($hadLibrary) { Write-Host '  Keeping your current song library.' }
-  else { Write-Host '  No song library unlocked: hosting needs one (see README).' }
-}
-
 function Start-Listener {
   for ($candidate = $Port; $candidate -lt $Port + $PortAttempts; $candidate++) {
     $listener = New-Object System.Net.HttpListener
@@ -252,10 +141,8 @@ function Send-File($context) {
   }
 }
 
-if ($Mode -eq 'host') {
-  # Your own data\library.db wins; otherwise the shared encrypted library is used.
-  if (Test-Path $LibraryDb) { Update-Library } else { Unlock-Library }
-}
+# The encrypted library was unlocked earlier by library.ps1; data\library.db is exported here.
+if ($Mode -eq 'host') { Update-Library }
 
 $server = Start-Listener
 $url = "http://localhost:$($server.Port)/?mode=$Mode"

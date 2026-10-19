@@ -7,6 +7,11 @@ rem Update check. Kept on ONE line: an update may rewrite this file, and cmd rea
 rem line, so the restart must already be parsed. Exit code 10 = files updated -> relaunch.
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0launcher\update.ps1" & if errorlevel 10 (start "" "%~f0" & exit /b)
 
+rem Song library: without your own data\library.db, the password of the shared library is
+rem required. Exit code 1 = no access -> the launcher closes.
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0launcher\library.ps1"
+if errorlevel 1 exit
+
 cls
 echo.
 echo   ==================================================

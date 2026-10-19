@@ -14,12 +14,13 @@ time you open it.
 
 ## Song library
 
-The host needs a song library. Players who only join don't need one.
+The game comes with a password-protected song library.
 
-- **Have the password?** Just host: the launcher asks for it once and unlocks the included
-  library. Library updates come with the normal game updates.
+- **Have the password?** The launcher asks for it on first start and can remember it.
+  Library updates come with the normal game updates.
 - **No password?** Build your own library: put a `library.db` in `data/`
   (needs [Node.js](https://nodejs.org) 22.5+), or a `library.json` in `app/data/`.
+  Without either, the launcher closes.
 
 ## How to play
 
