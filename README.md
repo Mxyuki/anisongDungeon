@@ -14,13 +14,12 @@ time you open it.
 
 ## Song library
 
-The host needs a song library. **It isn't included in this repository**: you either get one
-from someone who has it, or build your own.
+The host needs a song library. Players who only join don't need one.
 
-- `library.db` → put it in `data/` (needs [Node.js](https://nodejs.org) 22.5+)
-- or `library.json` → put it in `app/data/`
-
-Players who only join don't need a library.
+- **Have the password?** Just host: the launcher asks for it once and unlocks the included
+  library. Library updates come with the normal game updates.
+- **No password?** Build your own library: put a `library.db` in `data/`
+  (needs [Node.js](https://nodejs.org) 22.5+), or a `library.json` in `app/data/`.
 
 ## How to play
 
@@ -44,6 +43,7 @@ Drop `.png` / `.webp` images into `app/avatars/` to add avatars.
 npm test                # tests (Node 22.5+)
 npm run check           # syntax check
 npm run export-library  # build app/data/library.json from data/library.db
+npm run encrypt-library # encrypt it into library/library.enc (asks for the password)
 ```
 
 `tools/export-library.mjs` describes the database format it expects.

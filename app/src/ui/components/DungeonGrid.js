@@ -63,6 +63,9 @@ export class DungeonGrid {
   #classesFor(grid, cell, x, y, discovered) {
     const classes = ['cell', `cell--${cell.state}`];
     if (cell.state === 'void') return classes;
+    // Unexplored tiles touching explored ground can be stepped on and answered; the others are
+    // only seen through the fog and stay locked until a neighbor is explored.
+    if (cell.state === 'open') classes.push(touchesCleared(grid, x, y) ? 'cell--reachable' : 'cell--locked');
     if (cell.area === -1) classes.push('cell--neutral');
     if (cell.area !== null && cell.area >= 0) classes.push(`cell--area-${cell.area}`);
     if (cell.content && cell.state !== 'cleared') classes.push('cell--marker');
@@ -98,7 +101,7 @@ export class DungeonGrid {
     if (badge) element.append(h('span', { class: 'cell__progress', text: badge, title: describeProgress(cell.progress) }));
     if (here.length > 0) element.append(this.#tokens(here, selfId, avatarsById));
     const names = here.map((player) => (player.id === selfId ? 'you' : player.name));
-    element.setAttribute('aria-label', [describeCell(cell), ...names].join(', '));
+    element.setAttribute('aria-label', [describeState(cell, className.split(' ')), ...names].join(', '));
   }
 
   /** One big token alone; several players share the cell in a 2×2 layout with a "+n" badge. */
@@ -112,6 +115,16 @@ export class DungeonGrid {
     group.title = here.map((player) => player.name).join(', ');
     return group;
   }
+}
+
+/** Whether an orthogonal neighbor (players move one edge at a time) is explored. */
+function touchesCleared(grid, x, y) {
+  return EDGES.some(([dx, dy]) => {
+    const nx = x + dx;
+    const ny = y + dy;
+    const inside = nx >= 0 && ny >= 0 && nx < grid.size && ny < grid.size;
+    return inside && grid.cells[ny * grid.size + nx].state === 'cleared';
+  });
 }
 
 /**
@@ -140,4 +153,11 @@ function describeCell(cell) {
   if (cell.content) return cell.state === 'cleared' ? `${cell.content} (explored)` : `${cell.content} (located)`;
   if (cell.state === 'void') return 'nothing';
   return cell.state === 'cleared' ? 'explored' : 'unexplored';
+}
+
+/** Accessible name of a cell, including whether it can be answered now. */
+function describeState(cell, classes) {
+  if (classes.includes('cell--reachable')) return `${describeCell(cell)}, can be answered`;
+  if (classes.includes('cell--locked')) return `${describeCell(cell)}, locked`;
+  return describeCell(cell);
 }

@@ -739,13 +739,45 @@
     repeating-linear-gradient(135deg, var(--color-fog) 0 4px, var(--color-fog-line) 4px 5px);
 }
 
-.cell--open {
-  --tint: 24%;
+/*
+ * Three tile states must read at a glance:
+ *   answered  (cleared)   solid fill + check mark
+ *   can answer (reachable) dark tile, bright solid border + "?"
+ *   locked    (locked)    faint, dashed, seen through the fog only
+ */
+.cell--locked {
+  --tint: 8%;
   border-style: dashed;
+  opacity: 0.55;
 }
 
-.cell--open.cell--neutral {
-  --tint: 10%;
+.cell--reachable {
+  --tint: 0%;
+  border: 2px solid var(--area-color, var(--color-accent));
+  box-shadow: inset 0 0 8px color-mix(in srgb, var(--area-color, var(--color-accent)) 35%, transparent);
+  cursor: pointer;
+}
+
+.cell--reachable.cell--neutral {
+  border-color: var(--color-accent);
+  box-shadow: inset 0 0 8px var(--color-accent-soft);
+}
+
+.cell--reachable:hover {
+  background: color-mix(in srgb, var(--area-color, var(--color-accent)) 18%, var(--color-locked-cell));
+}
+
+.cell--reachable:not(.cell--occupied):not(.cell--marker)::after {
+  content: '?';
+  font-family: var(--font-display);
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--area-color, var(--color-accent));
+  pointer-events: none;
+}
+
+.cell--reachable.cell--neutral:not(.cell--occupied):not(.cell--marker)::after {
+  color: var(--color-accent);
 }
 
 .cell--cleared.cell--neutral {
@@ -755,6 +787,19 @@
 
 .cell--cleared:not(.cell--neutral) {
   --tint: 58%;
+}
+
+/* Check mark in the corner of answered tiles (hidden under icons and players). */
+.cell--cleared:not(.cell--occupied):not(:has(.cell__icon))::after {
+  content: '\2713';
+  position: absolute;
+  top: 0;
+  right: 2px;
+  font-size: 0.6rem;
+  line-height: 1.2;
+  color: var(--color-text);
+  opacity: 0.7;
+  pointer-events: none;
 }
 
 .cell--neutral {
@@ -878,6 +923,22 @@
 .legend__swatch {
   width: 12px;
   height: 12px;
+  border: 1px solid var(--color-line-strong);
+}
+
+.legend__swatch--cleared {
+  background: var(--color-neutral-cell);
+}
+
+.legend__swatch--reachable {
+  border: 2px solid var(--color-accent);
+  background: var(--color-locked-cell);
+}
+
+.legend__swatch--locked {
+  border-style: dashed;
+  background: var(--color-locked-cell);
+  opacity: 0.55;
 }
 
 .legend__dot {

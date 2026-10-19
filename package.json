@@ -10,6 +10,7 @@
   "scripts": {
     "test": "node --test \"tests/*.test.js\"",
     "check": "node tools/check-syntax.mjs",
-    "export-library": "node tools/export-library.mjs"
+    "export-library": "node tools/export-library.mjs",
+    "encrypt-library": "node tools/encrypt-library.mjs"
   }
 }

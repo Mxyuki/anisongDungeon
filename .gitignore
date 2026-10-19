@@ -1,8 +1,9 @@
-# Private song library: shared by hand, never published.
-# library.json is generated from library.db and holds the same data.
+# Private song library: never published in clear. library.json is generated from library.db
+# (or decrypted from library/library.enc, which IS published) and holds the same data.
+# data/ also holds a host's remembered library password.
 data/*
 !data/.gitkeep
-app/data/library.json
+app/data/
 
 # Local notes for Claude Code
 CLAUDE.md

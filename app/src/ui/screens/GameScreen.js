@@ -172,6 +172,9 @@ export class GameScreen {
     els.mapTitle = h('span', { class: 'panel__title' });
     els.mapHint = h('p', { class: 'map__hint' });
     const legend = h('div', { class: 'legend' },
+      h('span', { class: 'legend__item' }, h('span', { class: 'legend__swatch legend__swatch--cleared' }), 'Answered'),
+      h('span', { class: 'legend__item' }, h('span', { class: 'legend__swatch legend__swatch--reachable' }), 'Can answer'),
+      h('span', { class: 'legend__item' }, h('span', { class: 'legend__swatch legend__swatch--locked' }), 'Locked'),
       h('span', { class: 'legend__item' }, h('span', { class: 'legend__dot' }), 'You'),
       h('span', { class: 'legend__item' }, icon('start'), 'Entrance'),
       h('span', { class: 'legend__item' }, icon('key'), 'Key'),
