@@ -1,6 +1,6 @@
 {
   "name": "anisong-dungeon",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "description": "Multiplayer anime song guessing dungeon crawler. Dev tooling only — players need no Node.",
   "type": "module",
