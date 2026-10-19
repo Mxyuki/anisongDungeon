@@ -1,0 +1,80 @@
+/* Design tokens. The ONLY file allowed to contain raw color values. */
+:root {
+  color-scheme: dark;
+
+  /* Surfaces */
+  --color-bg: #0b0d10;
+  --color-bg-stripe: #10131a;
+  --color-panel: #13171d;
+  --color-panel-raised: #1a1f27;
+  --color-panel-header: #0f1216;
+  --color-line: #262c35;
+  --color-line-strong: #3a424e;
+  --color-overlay: rgba(8, 10, 13, 0.86);
+  --shadow-pop: 0 12px 30px rgba(0, 0, 0, 0.5);
+
+  /* Text */
+  --color-text: #e8eaed;
+  --color-text-muted: #8d95a1;
+  --color-text-dim: #59616d;
+
+  /* Accents */
+  --color-accent: #ffd400;
+  --color-accent-soft: rgba(255, 212, 0, 0.14);
+  --color-accent-ink: #121212;
+  --color-info: #3cc8f0;
+  --color-success: #3ddc97;
+  --color-success-soft: rgba(61, 220, 151, 0.14);
+  --color-danger: #ff4d5e;
+  --color-danger-soft: rgba(255, 77, 94, 0.14);
+
+  /* Dungeon sectors */
+  --color-area-0: #3cc8f0;
+  --color-area-1: #f2609e;
+  --color-area-2: #a6e22e;
+  --color-area-neutral: #c9d1dc;
+  --color-neutral-cell: #2a313c;
+  --color-locked-cell: #14181e;
+  --color-fog: #07090b;
+  --color-fog-line: #11151a;
+
+  /* Player dots without an avatar (PLAYER_COLOR_COUNT in config.js) */
+  --color-player-0: #ffd400;
+  --color-player-1: #3cc8f0;
+  --color-player-2: #f2609e;
+  --color-player-3: #a6e22e;
+  --color-player-4: #ff8a3d;
+  --color-player-5: #b388ff;
+  --color-player-6: #4fe0b6;
+  --color-player-7: #f5f5f5;
+
+  /* Typography */
+  --font-display: 'Oswald', 'Arial Narrow', sans-serif;
+  --font-body: 'Inter', 'Segoe UI', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', 'Consolas', monospace;
+  --text-xs: 0.6875rem;
+  --text-sm: 0.8125rem;
+  --text-md: 0.9375rem;
+  --text-lg: 1.125rem;
+  --text-xl: 1.5rem;
+  --text-2xl: 2.25rem;
+  --text-hero: clamp(3.5rem, 8vw, 6.5rem);
+
+  /* Spacing */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --space-7: 48px;
+
+  /* Shape */
+  --cut: 12px;
+  --cut-sm: 7px;
+  --border: 1px solid var(--color-line);
+
+  /* Motion */
+  --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
+  --duration: 160ms;
+}

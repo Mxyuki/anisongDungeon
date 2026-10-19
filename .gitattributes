@@ -1,0 +1,3 @@
+# Store every file byte-for-byte (no line-ending conversion): the launcher's updater compares
+# local files with the repository's exact bytes, and .cmd files need their CRLF endings.
+* -text

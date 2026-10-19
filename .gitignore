@@ -1,0 +1,15 @@
+# Private song library: shared by hand, never published.
+# library.json is generated from library.db and holds the same data.
+data/*
+!data/.gitkeep
+app/data/library.json
+
+# Local notes for Claude Code
+CLAUDE.md
+.claude/
+
+# Local archives
+*.rar
+*.zip
+
+node_modules/
