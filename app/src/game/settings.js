@@ -11,7 +11,7 @@ import { clampNumber } from '../core/text.js';
 
 /** @typedef {import('./types.js').GameSettings} GameSettings */
 
-const BOOLEAN_SETTINGS = ['anySeason', 'seasonRange'];
+const BOOLEAN_SETTINGS = ['anySeason', 'seasonRange', 'lateJoin'];
 
 /**
  * Merges untrusted input onto the previous settings and clamps every field.
@@ -58,12 +58,13 @@ function orderSeasonRange(settings, movedEnd) {
 }
 
 /**
- * Number of floors players actually explore (reaching the last floor ends the run).
+ * Number of floors players explore: every floor is played, and opening a door on the last one
+ * reaches the summit (the end of the run).
  * @param {GameSettings} settings
  * @returns {number}
  */
 export function playableFloors(settings) {
-  return settings.floors - 1;
+  return settings.floors;
 }
 
 /**

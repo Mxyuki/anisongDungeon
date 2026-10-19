@@ -55,6 +55,7 @@
  * @property {number} rerollIntervalSec
  * @property {number} maxRerolls
  * @property {number} tilesPerArea
+ * @property {number} revealAfter  Songs guessed in an area before its key and door are shown.
  * @property {'anime' | 'songArtist'} answerMode  What players must name for each song.
  * @property {'shown' | 'hidden' | 'off'} artistAreas  Anime mode: artist areas and their labels.
  * @property {boolean} anySeason   Anime mode: any entry of the franchise is a right answer.
@@ -63,6 +64,7 @@
  * @property {number} fromSeason   0 Winter … 3 Fall (SEASONS).
  * @property {number} toYear
  * @property {number} toSeason
+ * @property {boolean} lateJoin    Newcomers may join a running game (no AniList: the pool stays).
  */
 
 export {};

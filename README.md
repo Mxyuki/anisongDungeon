@@ -36,6 +36,12 @@ The host can pick the song types, number of floors, time limit, answer mode (ani
 artist), and a season range (e.g. 2000 → 2009). Link your **AniList** to play songs from the
 anime you've watched.
 
+The host can also turn each player's AniList on or off, kick players, and let people join a
+game already in progress.
+
+After a game, **Visit the maps** shows every floor: each tile's song, who found it, the songs
+nobody found, and the songs that were rerolled away.
+
 Drop `.png` / `.webp` images into `app/avatars/` to add avatars.
 
 ## Development

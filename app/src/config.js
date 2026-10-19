@@ -39,8 +39,6 @@ export const GRID_SIZE = 15;
 export const AREA_COUNT = 3;
 /** Layout retries before accepting a floor with undersized areas or dead ends. */
 export const MAP_GENERATION_ATTEMPTS = 60;
-/** Correct guesses inside a sector after which its key and door locations are shown. */
-export const AREA_REVEAL_GUESSES = 3;
 export const KEYS_REQUIRED = 3;
 export const DOOR_TAG_COUNT = 3;
 /** A tag can theme an area only if the pool has at least this many songs for it. */
@@ -53,6 +51,11 @@ export const MIN_SONGS_PER_TAG = 15;
 export const ARTIST_AREA_CHANCE = 0.15;
 export const ARTIST_AREA_MIN_SONGS = 10;
 export const ARTIST_AREA_PICK_ATTEMPTS = 20;
+/**
+ * Most artist areas one artist may lead in a game (door themes included, picked or not), so a
+ * small pool does not show the same artist again and again. Used up → regular themes.
+ */
+export const ARTIST_AREA_MAX_PER_ARTIST = 1;
 /** Theme label of an artist area: prefix + "Artist A & Artist B". */
 export const ARTIST_TAG_PREFIX = 'Artists: ';
 /** Host choice (anime mode): artist areas show their 2 artists, hide them, or never appear. */
@@ -86,17 +89,26 @@ export const MEDIA_HOSTS = [
 export const UNKNOWN_GUESS_RATE = 25;
 /** Most songs of one anime that can be served in the same area of a floor (anti-spam). */
 export const MAX_SONGS_PER_ANIME_PER_AREA = 2;
-/** Guess-rate window center on the first and last playable floor. Higher = easier. */
-export const DIFFICULTY_EASY_CENTER = 58;
-export const DIFFICULTY_HARD_CENTER = 12;
-export const DIFFICULTY_HALF_WIDTH = 22;
+/**
+ * Guess-rate bands (% of players who know a song; higher = easier). Floor 1 plays the first band,
+ * the last floor the last one (its IDEAL part when enough songs fit), floors between move by
+ * equal steps (see game/difficulty.js floorBand).
+ */
+export const DIFFICULTY_FIRST_FLOOR = Object.freeze({ min: 80, max: 100 });
+export const DIFFICULTY_LAST_FLOOR = Object.freeze({ min: 0, max: 15 });
+export const DIFFICULTY_LAST_FLOOR_IDEAL = Object.freeze({ min: 0, max: 10 });
+/** Too few songs in a band: this many of the closest songs are used instead. */
 export const DIFFICULTY_MIN_CANDIDATES = 6;
+/** Unheard songs are preferred unless they are this far (in %) out of the band. */
+export const DIFFICULTY_MAX_DRIFT = 15;
 /** The song starts at a random point within this fraction of its length. */
 export const MAX_START_FRACTION = 0.45;
 /** Seconds of audio that should remain after the random start point. */
 export const MIN_PLAY_SECONDS = 25;
 /** Anime seasons, in library order (index = the library's season number). */
 export const SEASONS = Object.freeze(['Winter', 'Spring', 'Summer', 'Fall']);
+/** Played on the results screen when the team reaches the summit (stops back in the lobby). */
+export const WIN_MUSIC_URL = 'sounds/win.mp3';
 /**
  * Host choices when the pool has fewer songs than the floors need (see songsNeeded()):
  * repeat songs of the pool, or top it up with library songs matching the settings.
@@ -150,6 +162,8 @@ export const DEFAULT_SETTINGS = Object.freeze({
   rerollIntervalSec: 45,
   maxRerolls: 3,
   tilesPerArea: 15,
+  /** Songs guessed in an area before its key and door are marked on the map (0 = at once). */
+  revealAfter: 3,
   answerMode: 'anime',
   artistAreas: 'shown',
   /** Anime mode: accept any season/entry of the franchise, not only the exact anime. */
@@ -160,14 +174,17 @@ export const DEFAULT_SETTINGS = Object.freeze({
   fromSeason: 0,
   toYear: 2009,
   toSeason: 3,
+  /** Mid-game, anyone with the room code may join as a new player (name + avatar only). */
+  lateJoin: false,
 });
 
 export const SETTINGS_LIMITS = Object.freeze({
-  floors: { min: 2, max: 20 },
+  floors: { min: 1, max: 20 },
   timeLimitMin: { min: 5, max: 180 },
   rerollIntervalSec: { min: 10, max: 600 },
   maxRerolls: { min: 1, max: 10 },
   tilesPerArea: { min: 6, max: 40 },
+  revealAfter: { min: 0, max: 20 },
   fromYear: { min: 1920, max: 2030 },
   fromSeason: { min: 0, max: SEASONS.length - 1 },
   toYear: { min: 1920, max: 2030 },

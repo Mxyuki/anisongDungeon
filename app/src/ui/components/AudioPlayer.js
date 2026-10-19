@@ -3,7 +3,11 @@ import { Emitter } from '../../core/emitter.js';
 
 const DEFAULT_VOLUME = 0.6;
 
-function loadVolume() {
+/**
+ * The player's saved music volume (0-1), also used for other music (win theme).
+ * @returns {number}
+ */
+export function savedVolume() {
   try {
     const stored = Number(localStorage.getItem(STORAGE_KEYS.volume));
     return Number.isFinite(stored) && stored > 0 ? Math.min(1, stored) : DEFAULT_VOLUME;
@@ -28,7 +32,7 @@ export class AudioPlayer extends Emitter {
   constructor() {
     super();
     this.#audio.preload = 'auto';
-    this.#audio.volume = loadVolume();
+    this.#audio.volume = savedVolume();
     this.#audio.addEventListener('loadedmetadata', () => this.#seekToStart());
     this.#audio.addEventListener('playing', () => this.#setState('playing'));
     this.#audio.addEventListener('pause', () => this.#setState('paused'));

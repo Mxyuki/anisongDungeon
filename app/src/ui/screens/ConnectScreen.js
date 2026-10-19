@@ -1,11 +1,24 @@
 import { NAME_MAX_LENGTH, ROOM_CODE_LENGTH } from '../../config.js';
 import { normalizeRoomCode, isValidRoomCode } from '../../net/roomCode.js';
-import { h, panel, setText } from '../dom.js';
+import { h, panel, replaceChildren, setText } from '../dom.js';
 import { icon } from '../icons.js';
+
+const REJOIN_TEXT = {
+  label: 'Your name in this game',
+  hint: 'A game is in progress. Type the name you had before you got disconnected to take your place back.',
+  button: 'Rejoin',
+};
+/** When the host allows late joins, newcomers pick a name and an avatar. */
+const LATE_JOIN_TEXT = {
+  label: 'Your name',
+  hint: 'A game is in progress: pick a name and an avatar to join it. Got disconnected? Type the name you had to take your place back.',
+  button: 'Join',
+};
 
 /**
  * First screen. Join mode: room code entry, then (when a game is already running) the name of
- * the disconnected player to rejoin as. Host mode: server boot status.
+ * the disconnected player to rejoin as, or a name and avatar to join as a newcomer.
+ * Host mode: server boot status.
  */
 export class ConnectScreen {
   #client;
@@ -17,6 +30,13 @@ export class ConnectScreen {
   #rejoinForm;
   #nameInput;
   #rejoinButton;
+  #rejoinLabel;
+  #rejoinHint;
+  #avatarField;
+  #avatarGrid;
+  #avatar = '';
+  /** Catalog the avatar picker was built from (rebuilt when it changes). */
+  #renderedAvatars = null;
   #status;
   #retryButton;
 
@@ -109,19 +129,46 @@ export class ConnectScreen {
       class: 'btn btn--primary btn--block',
       type: 'button',
       onClick: () => this.#rejoin(),
-    }, 'Rejoin', icon('play'));
+    });
+    this.#rejoinLabel = h('span', { class: 'field__label' });
+    this.#rejoinHint = h('p', { class: 'hint' });
+    this.#avatarGrid = h('div', { class: 'avatar-grid avatar-grid--compact' });
+    this.#avatarField = h('div', { class: 'field', hidden: true },
+      h('span', { class: 'field__label', text: 'Avatar' }),
+      this.#avatarGrid);
     this.#rejoinForm = h('div', { class: 'connect__form', hidden: true },
-      h('label', { class: 'field' },
-        h('span', { class: 'field__label', text: 'Your name in this game' }),
-        this.#nameInput),
-      h('p', { class: 'hint', text: 'A game is in progress. Type the name you had before you got disconnected to take your place back.' }),
+      h('label', { class: 'field' }, this.#rejoinLabel, this.#nameInput),
+      this.#avatarField,
+      this.#rejoinHint,
       this.#rejoinButton);
     return this.#rejoinForm;
   }
 
   #rejoin() {
     const name = this.#nameInput.value.trim();
-    if (name) this.#client.rejoin(name);
+    if (name) this.#client.rejoin(name, this.#avatar);
+  }
+
+  /** Avatar picker of late joiners (same catalog as the lobby's). */
+  #renderAvatars(avatars) {
+    if (avatars !== this.#renderedAvatars) {
+      this.#renderedAvatars = avatars;
+      const option = (id, name, image) => h('button', {
+        class: 'avatar-option', type: 'button', dataset: { id }, title: name,
+        onClick: () => {
+          this.#avatar = id;
+          this.#renderAvatars(avatars);
+        },
+      }, image, h('span', { class: 'avatar-option__name', text: name }));
+      replaceChildren(this.#avatarGrid,
+        option('', 'None', h('span', { class: 'avatar-option__image', text: '—' })),
+        avatars.map((avatar) => option(avatar.id, avatar.name,
+          h('img', { class: 'avatar-option__image', src: avatar.url, alt: '' }))));
+    }
+    if (!avatars.some((avatar) => avatar.id === this.#avatar)) this.#avatar = '';
+    for (const element of this.#avatarGrid.querySelectorAll('.avatar-option')) {
+      element.classList.toggle('avatar-option--active', element.dataset.id === this.#avatar);
+    }
   }
 
   #syncRejoinButton(pending = false) {
@@ -129,17 +176,26 @@ export class ConnectScreen {
   }
 
   /** Swaps between the code form and the rejoin (name) form. */
-  #updateRejoin(rejoin) {
+  #updateRejoin(rejoin, avatars) {
     const asking = rejoin !== null;
     const wasAsking = !this.#rejoinForm.hidden;
     this.#codeForm.hidden = asking;
     this.#rejoinForm.hidden = !asking;
     if (!asking) return;
     if (!wasAsking) {
-      this.#nameInput.value = this.#client.savedProfile.name;
+      const profile = this.#client.savedProfile;
+      this.#nameInput.value = profile.name;
+      this.#avatar = profile.avatar;
       this.#nameInput.focus();
       this.#nameInput.select();
     }
+    const text = rejoin.canJoin ? LATE_JOIN_TEXT : REJOIN_TEXT;
+    setText(this.#rejoinLabel, text.label);
+    setText(this.#rejoinHint, text.hint);
+    this.#nameInput.setAttribute('aria-label', text.label);
+    replaceChildren(this.#rejoinButton, text.button, icon('play'));
+    this.#avatarField.hidden = !rejoin.canJoin || avatars.length === 0;
+    if (rejoin.canJoin) this.#renderAvatars(avatars);
     this.#syncRejoinButton(rejoin.pending);
   }
 
@@ -172,7 +228,7 @@ export class ConnectScreen {
     } else {
       const { rejoin } = state;
       if (failed && !this.#codeInput.value && state.roomCode) this.#codeInput.value = state.roomCode;
-      this.#updateRejoin(rejoin);
+      this.#updateRejoin(rejoin, state.avatars);
       let message = connecting ? 'Establishing link…' : failed ? error : '';
       if (rejoin) message = rejoin.pending ? 'Checking…' : rejoin.error;
       setText(this.#status, message);

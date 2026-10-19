@@ -1,4 +1,4 @@
-import { AREA_REVEAL_GUESSES, KEYS_REQUIRED, MOVE_REPEAT_MS } from '../../config.js';
+import { KEYS_REQUIRED, MOVE_REPEAT_MS } from '../../config.js';
 import { formatDuration } from '../../core/time.js';
 import { AudioPlayer } from '../components/AudioPlayer.js';
 import { AnswerForm } from '../components/AnswerForm.js';
@@ -6,17 +6,16 @@ import { DungeonGrid } from '../components/DungeonGrid.js';
 import { playKeyChime } from '../components/sfx.js';
 import { showToast } from '../components/toast.js';
 import { h, panel, replaceChildren, setText } from '../dom.js';
-import { formatSongSlot, formatSongType, formatTag, pad2 } from '../format.js';
+import { answerDetails } from '../components/answerDetails.js';
+import { formatSongType, formatTag, NEUTRAL_AREA, pad2, SECTOR_LETTERS } from '../format.js';
 import { icon } from '../icons.js';
 import { avatarLookup, playerToken } from '../components/playerToken.js';
 
 const CLOCK_INTERVAL_MS = 250;
 const TIMER_WARNING_MS = 60_000;
 const EQ_BARS = 16;
-const SECTOR_LETTERS = ['A', 'B', 'C', 'D', 'E'];
 /** How long the "Return to lobby" button waits for its confirmation click. */
 const LOBBY_CONFIRM_MS = 3000;
-const NEUTRAL_AREA = -1;
 /** Door roll animation: first highlight step, slowdown per step, pause on the winner. */
 const ROLL_FIRST_STEP_MS = 60;
 const ROLL_SLOWDOWN = 1.18;
@@ -47,6 +46,8 @@ export class GameScreen {
   #state = null;
   #challengeId = null;
   #resultSeq = 0;
+  /** Songs guessed in an area before its key and door show (host setting). */
+  #revealAfter = 0;
   #doorsSignature = '';
   #lastMoveAt = 0;
   /** Keys and floor seen in the previous update, to notice a new key. */
@@ -78,7 +79,8 @@ export class GameScreen {
     this.#root = h('div', { class: 'screen game' },
       this.#buildHud(state.game.settings, state.isHost),
       h('div', { class: 'game__body' },
-        h('aside', { class: 'game__side game__side--left' }, this.#buildSectorsPanel(), this.#buildDoorsPanel()),
+        h('aside', { class: 'game__side game__side--left' },
+          this.#buildSectorsPanel(state.game.settings.revealAfter), this.#buildDoorsPanel()),
         h('main', { class: 'game__center' }, this.#buildMapPanel()),
         h('aside', { class: 'game__side game__side--right' },
           this.#buildSignalPanel(), this.#buildResultPanel(), this.#buildRankingPanel())));
@@ -156,10 +158,14 @@ export class GameScreen {
     return h('div', { class: 'hud__block hud__block--action' }, button);
   }
 
-  #buildSectorsPanel() {
+  /** @param {number} revealAfter  Songs guessed in an area before its key and door show. */
+  #buildSectorsPanel(revealAfter) {
+    this.#revealAfter = revealAfter;
     this.#els.sectors = h('ul', { class: 'sectors' });
+    const reveal = revealAfter === 0 ? 'Keys and doors are marked on the map from the start.'
+      : `After ${revealAfter} song${revealAfter > 1 ? 's' : ''} guessed in an area, its key and door are marked on the map.`;
     return panel({ title: 'Sectors', code: 'MAP // A-C' }, this.#els.sectors,
-      h('p', { class: 'hint', text: `Explore an area to reveal its outline. After ${AREA_REVEAL_GUESSES} songs guessed in an area, its key and door are marked on the map. The center has a door but no key.` })).root;
+      h('p', { class: 'hint', text: `Explore an area to reveal its outline. ${reveal} The center has a door but no key.` })).root;
   }
 
   #buildDoorsPanel() {
@@ -325,13 +331,13 @@ export class GameScreen {
       h('div', { class: 'sector__info' },
         h('span', { class: 'sector__tag', text: 'Center' }),
         h('span', { class: 'sector__status', text: center.revealed ? 'Door located · any song'
-          : `${center.guesses}/${AREA_REVEAL_GUESSES} songs to locate the door · any song` })),
+          : `${center.guesses}/${this.#revealAfter} songs to locate the door · any song` })),
       h('span', { class: 'sector__items' },
         icon('door', `sector__item${center.doorFound ? ' sector__item--done' : ''}`)));
     replaceChildren(this.#els.sectors, centerRow, run.grid.areas.map((area) => {
       const status = !area.discovered ? 'Not found yet'
         : area.revealed ? 'Key & door located'
-          : `${area.guesses}/${AREA_REVEAL_GUESSES} songs to locate key & door`;
+          : `${area.guesses}/${this.#revealAfter} songs to locate key & door`;
       return h('li', { class: `sector sector--area-${area.index}${area.discovered ? '' : ' sector--unknown'}` },
         h('span', { class: 'sector__swatch' }),
         h('div', { class: 'sector__info' },
@@ -367,7 +373,7 @@ export class GameScreen {
       run,
       playerId,
       avatarsById,
-      isFinal: run.floor + 1 >= game.settings.floors,
+      isFinal: run.floor >= game.settings.floors,
       voting: online.length >= 2,
       playersById: new Map(players.map((player) => [player.id, player])),
     };
@@ -491,7 +497,7 @@ export class GameScreen {
       if (run.tileAnswer) {
         // Standing on an explored tile: show what its song was.
         setText(els.signalTitle, 'Explored tile');
-        replaceChildren(els.signalIdle, h('div', { class: 'result tile-answer' }, this.#answerDetails(run.tileAnswer)));
+        replaceChildren(els.signalIdle, h('div', { class: 'result tile-answer' }, answerDetails(run.tileAnswer)));
         return;
       }
       setText(els.signalTitle, 'Exploring');
@@ -556,21 +562,8 @@ export class GameScreen {
         result.by ? `${result.by} rerolled — it was` : 'Rerolled — it was'),
     };
     const banner = (banners[result.kind] ?? banners.correct)();
-    replaceChildren(this.#els.result, banner, this.#answerDetails(answer));
+    replaceChildren(this.#els.result, banner, answerDetails(answer));
     this.#els.result.className = 'result';
-  }
-
-  /** Anime, song and artist of a revealed song. */
-  #answerDetails(answer) {
-    return [
-      h('p', { class: 'result__anime', text: answer.anime }),
-      answer.englishName && h('p', { class: 'result__english', text: answer.englishName }),
-      h('p', { class: 'result__song' },
-        h('span', { class: 'chip chip--mono', text: formatSongSlot(answer.type, answer.number) }),
-        h('span', { text: ` ${answer.title}` })),
-      h('p', { class: 'result__artist', text: answer.artist }),
-      h('p', { class: 'result__rate', text: `Guess rate ${answer.guessRate}%` }),
-    ].filter(Boolean);
   }
 
   #renderRanking(entries, playerId, avatarsById, answerMode) {

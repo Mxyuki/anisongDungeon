@@ -1,4 +1,5 @@
 import {
+  ARTIST_AREA_MAX_PER_ARTIST,
   ARTIST_AREA_MIN_SONGS,
   ARTIST_AREA_PICK_ATTEMPTS,
   ARTIST_TAG_PREFIX,
@@ -26,8 +27,10 @@ export class SongPool {
   /** @type {Map<string, Song[]>} */ #byTag = new Map();
   /** @type {Map<string, Song[]>} Artist area themes created so far. */
   #byArtistTag = new Map();
-  /** @type {{ name: string, songs: Song[] }[] | null} Artists eligible for artist areas. */
+  /** @type {{ ref: string, name: string, songs: Song[] }[] | null} Artists eligible for artist areas. */
   #areaArtists = null;
+  /** @type {Map<string, number>} Artist areas created so far per artist (by artistRef). */
+  #artistAreaUses = new Map();
   /** @type {Map<string, string[]>} Cached answer keys by "<kind>:<song id>". */
   #answerKeys = new Map();
   /** @type {Map<string, Anime[]>} Normalized anime name → anime carrying it. */
@@ -124,13 +127,15 @@ export class SongPool {
 
   /**
    * Artists with at least ARTIST_AREA_MIN_SONGS songs in the pool (computed once).
-   * @returns {{ name: string, songs: Song[] }[]}
+   * @returns {{ ref: string, name: string, songs: Song[] }[]}
    */
   #artistsForAreas() {
     if (this.#areaArtists) return this.#areaArtists;
     const byArtist = new Map();
     for (const song of this.songs) {
-      if (!byArtist.has(song.artistRef)) byArtist.set(song.artistRef, { name: song.artist, songs: [] });
+      if (!byArtist.has(song.artistRef)) {
+        byArtist.set(song.artistRef, { ref: song.artistRef, name: song.artist, songs: [] });
+      }
       byArtist.get(song.artistRef).songs.push(song);
     }
     this.#areaArtists = [...byArtist.values()]
@@ -141,13 +146,14 @@ export class SongPool {
 
   /**
    * Picks 2 artists whose songs together fill an area and registers them as a theme: only their
-   * songs play under it.
+   * songs play under it. Each artist leads at most ARTIST_AREA_MAX_PER_ARTIST areas per game.
    * @param {Rng} rng
    * @param {number} minSongs  Songs the 2 artists need together (the area's tile count).
    * @returns {string | null} The theme label, or null when no pair fits.
    */
   createArtistTag(rng, minSongs) {
-    const artists = this.#artistsForAreas();
+    const uses = (artist) => this.#artistAreaUses.get(artist.ref) ?? 0;
+    const artists = this.#artistsForAreas().filter((artist) => uses(artist) < ARTIST_AREA_MAX_PER_ARTIST);
     if (artists.length < 2) return null;
     for (let attempt = 0; attempt < ARTIST_AREA_PICK_ATTEMPTS; attempt++) {
       const first = rng.int(0, artists.length - 1);
@@ -157,6 +163,7 @@ export class SongPool {
       if (a.songs.length + b.songs.length < minSongs) continue;
       const tag = `${ARTIST_TAG_PREFIX}${a.name} & ${b.name}`;
       if (!this.#byArtistTag.has(tag)) this.#byArtistTag.set(tag, [...a.songs, ...b.songs]);
+      for (const artist of [a, b]) this.#artistAreaUses.set(artist.ref, uses(artist) + 1);
       return tag;
     }
     return null;

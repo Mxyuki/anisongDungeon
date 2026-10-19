@@ -2,10 +2,11 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  AREA_REVEAL_GUESSES,
   ARTIST_TAG_HIDDEN,
   ARTIST_TAG_PREFIX,
   DEFAULT_SETTINGS,
+  DIFFICULTY_MAX_DRIFT,
+  DIFFICULTY_MIN_CANDIDATES,
   DOOR_ROLL_MS,
   MIN_SONGS_PER_TAG,
 } from '../app/src/config.js';
@@ -17,6 +18,7 @@ import { GameClient } from '../app/src/client/GameClient.js';
 import { createInitialState, Store } from '../app/src/client/store.js';
 import { isCorrectAnswer } from '../app/src/game/answers.js';
 import { cellCoords, neighborIndices, NEUTRAL_AREA, VOID_AREA } from '../app/src/game/dungeon.js';
+import { bandDistance, floorBand } from '../app/src/game/difficulty.js';
 import { createLoopbackPair } from '../app/src/net/transport.js';
 import { GameSession } from '../app/src/server/GameSession.js';
 import { createRng } from '../app/src/core/rng.js';
@@ -24,14 +26,17 @@ import { HostServer } from '../app/src/server/HostServer.js';
 
 const GENRES = ['Action', 'Comedy', 'Mecha', 'Romance'];
 
-/** 80 anime × 3 songs (OP/ED/IN), genres cycling so every genre is eligible. */
-function makeLibrary() {
+/**
+ * 80 anime × 3 songs (OP/ED/IN), genres cycling so every genre is eligible.
+ * @param {{ guessRate?: (id: number) => number }} [options]  Guess rate of each anime's songs.
+ */
+function makeLibrary({ guessRate = (id) => (id * 7) % 100 } = {}) {
   const anime = [];
   const songs = [];
   for (let id = 1; id <= 80; id++) {
     anime.push([id, 1000 + id, `Anime ${id}`, `Show ${id} English`, [], [GENRES[id % 4]], ['School']]);
     for (let type = 1; type <= 3; type++) {
-      songs.push([id * 10 + type, id, `Song ${id}-${type}`, 'Artist', type, 1, (id * 7) % 100, `${id}-${type}.mp3`, []]);
+      songs.push([id * 10 + type, id, `Song ${id}-${type}`, 'Artist', type, 1, guessRate(id), `${id}-${type}.mp3`, []]);
     }
   }
   return decodeLibrary({ anime, songs });
@@ -39,8 +44,10 @@ function makeLibrary() {
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 5));
 
-function createSession({ settings = DEFAULT_SETTINGS, songTypes = ['OP', 'ED', 'IN'], players = ['p1'], now = Date.now() } = {}) {
-  const pool = new SongPool(makeLibrary(), { songTypes, aniListIds: null });
+function createSession({
+  settings = DEFAULT_SETTINGS, songTypes = ['OP', 'ED', 'IN'], players = ['p1'], now = Date.now(), library = makeLibrary(),
+} = {}) {
+  const pool = new SongPool(library, { songTypes, aniListIds: null });
   const session = new GameSession({
     pool, settings, now, players: players.map((id) => ({ id, name: id.toUpperCase() })),
   });
@@ -124,8 +131,9 @@ test('the team climbs every floor, then the session ends', () => {
     assert.ok(session.enterDoor('p1', door.areaIndex).ok);
   }
   assert.ok(expedition.finished);
-  assert.ok(results, 'reaching the last floor ends the game');
-  assert.equal(results.floorReached, 4);
+  assert.ok(results, 'the last floor\'s door ends the game');
+  assert.equal(results.floorReached, 4, 'all 4 floors were played');
+  assert.deepEqual(results.floors.map((floor) => floor.number), [1, 2, 3, 4]);
   assert.ok(results.finished);
   assert.ok(results.players[0].guessed > 0);
 });
@@ -208,11 +216,11 @@ test('fog of war, sector outlines, marker reveal; the center stays open', () => 
   const doorCell = sector.find((index) => expedition.floor.cells[index].content === 'door');
   const nextToExplore = () => sector.find((index) => index !== doorCell && !expedition.cleared.has(index)
     && neighborIndices(index).some((n) => expedition.cleared.has(n)));
-  while (expedition.areaGuesses[0] < AREA_REVEAL_GUESSES && nextToExplore() !== undefined) {
+  while (expedition.areaGuesses[0] < DEFAULT_SETTINGS.revealAfter && nextToExplore() !== undefined) {
     assert.equal(view().grid.cells[doorCell].content, null, 'not located yet');
     walkTo(context, me, nextToExplore());
   }
-  assert.equal(view().grid.cells[doorCell].content, 'door', `door located after ${AREA_REVEAL_GUESSES} songs`);
+  assert.equal(view().grid.cells[doorCell].content, 'door', `door located after ${DEFAULT_SETTINGS.revealAfter} songs`);
 });
 
 test('two players share the map: same tile, same song; one guess closes it for both', () => {
@@ -336,9 +344,10 @@ test('a collected key disappears from the map', () => {
   const { session, expedition, me } = context;
   const keyCell = cellsWith(expedition, (cell) => cell.content === 'key')[0];
   walkTo(context, me, keyCell);
-  assert.equal(expedition.keys, 1);
+  // The path may cross another key first (rare maps), so check this key rather than a count.
+  assert.ok(expedition.keys >= 1);
   assert.equal(session.viewFor('p1').grid.cells[keyCell].content, null);
-  assert.deepEqual(session.viewFor('p1').keyAreas, [expedition.floor.cells[keyCell].areaIndex],
+  assert.ok(session.viewFor('p1').keyAreas.includes(expedition.floor.cells[keyCell].areaIndex),
     'the HUD knows which sector the key came from');
   const doorCell = cellsWith(expedition, (cell) => cell.content === 'door')[0];
   walkTo(context, me, doorCell);
@@ -346,7 +355,8 @@ test('a collected key disappears from the map', () => {
 });
 
 test('at most 2 songs of the same anime play in one area per floor', () => {
-  const context = createSession();
+  // Every song fits floor 1's band, so the quota never competes with the difficulty.
+  const context = createSession({ library: makeLibrary({ guessRate: () => 90 }) });
   const { session, expedition, me } = context;
   const served = new Map();
   const seenTileSongs = new Set();
@@ -606,7 +616,7 @@ test('host and guest go from lobby to a shared game and back through the server'
 
   guest.client.setReady(true);
   await tick();
-  host.client.startGame();
+  host.client.startGame('duplicates'); // 3 floors need more than the 160 songs
   await tick();
   await tick();
 
@@ -682,7 +692,7 @@ test('a disconnected player rejoins mid-game from a new tab by typing their name
   const second = connectGuest();
   await tick();
   assert.notEqual(second.store.state.connection.status, 'connected');
-  assert.deepEqual(second.store.state.rejoin, { error: '', pending: false });
+  assert.deepEqual(second.store.state.rejoin, { error: '', pending: false, canJoin: false });
 
   second.client.rejoin('Someone Else');
   await tick();
@@ -709,7 +719,7 @@ test('the host is asked what to do when the pool is too small for every floor', 
   await tick();
   await tick();
   assert.equal(host.store.state.lobby.phase, 'lobby', 'the game waits for the host');
-  assert.deepEqual(host.store.state.poolShortage, { songCount: 80, needed: 240, canFill: false, fromLists: false });
+  assert.deepEqual(host.store.state.poolShortage, { songCount: 80, needed: 300, canFill: false, fromLists: false });
 
   host.client.dismissShortage();
   assert.equal(host.store.state.poolShortage, null, 'cancel closes the prompt');
@@ -720,4 +730,214 @@ test('the host is asked what to do when the pool is too small for every floor', 
   assert.equal(host.store.state.lobby.phase, 'playing');
   assert.equal(host.store.state.poolShortage, null);
   server.shutdown();
+});
+
+test('the results keep every floor for the map review: answers, solvers, rerolls', () => {
+  const context = createSession({ settings: { ...DEFAULT_SETTINGS, floors: 3 }, players: ['p1', 'p2'] });
+  const { session, expedition, pool } = context;
+  const p1 = session.players.get('p1');
+  const p2 = session.players.get('p2');
+  const start = p1.position;
+  const [first] = neighborIndices(start).filter((index) => expedition.isWalkable(index));
+
+  session.move('p1', cellCoords(first).x, cellCoords(first).y);
+  const rerolledAway = expedition.tileSongs.get(first).song;
+  assert.ok(session.reroll('p1').ok);
+  session.guess('p1', answerFor(pool, expedition, p1));
+  // The center door, then the keys: the team climbs to floor 2.
+  const centerDoor = expedition.floor.doors.find((door) => door.areaIndex === NEUTRAL_AREA);
+  walkTo(context, p1, centerDoor.y * expedition.floor.size + centerDoor.x);
+  for (const keyCell of cellsWith(expedition, (cell) => cell.content === 'key')) walkTo(context, p1, keyCell);
+  session.enterDoor('p1', NEUTRAL_AREA);
+  session.enterDoor('p2', NEUTRAL_AREA);
+  assert.equal(expedition.floorNumber, 2);
+  // Floor 2: P2 hears a song and the game ends before anyone answers it.
+  const second = neighborIndices(p2.position).find((index) => expedition.isWalkable(index));
+  session.move('p2', cellCoords(second).x, cellCoords(second).y);
+  const leftUnanswered = expedition.tileSongs.get(second).song;
+  session.end();
+
+  const { floors } = session.results();
+  assert.deepEqual(floors.map((floor) => floor.number), [1, 2], 'every floor played, the last one included');
+  const [floor1] = floors;
+  const solved = floor1.cells[first];
+  assert.equal(solved.state, 'answered');
+  assert.deepEqual(solved.solvers, ['P1']);
+  assert.equal(solved.rerolls.length, 1);
+  assert.equal(solved.rerolls[0].by, 'P1');
+  assert.equal(solved.rerolls[0].answer.title, rerolledAway.title, 'the song before the reroll');
+  const missed = floors[1].cells[second];
+  assert.equal(missed.state, 'unanswered');
+  assert.equal(missed.answer.title, leftUnanswered.title, 'unanswered tiles show their song');
+  assert.equal(floor1.cells[start].answer, null, 'the entrance has no song');
+  assert.ok(floor1.cells.some((cell) => cell.state === 'unvisited'));
+  assert.ok(floor1.cells.some((cell) => cell.state === 'void'));
+  assert.equal(floor1.cells.find((cell) => cell.state === 'unvisited').answer, null);
+});
+
+/** Host + one guest in a lobby, through the server. */
+async function createRoom(settings = {}) {
+  const transport = new FakeTransport();
+  const avatars = [{ id: 'cat.png', name: 'cat', url: 'data:image/webp;base64,AAAA' }];
+  const server = new HostServer(transport, makeLibrary(), avatars);
+  const host = createClient('host');
+  host.client.attach(server.connectLocal());
+  const connect = () => {
+    const client = createClient('join');
+    const [serverSide, clientSide] = createLoopbackPair('guest');
+    transport.emit('connection', serverSide);
+    client.client.attach(clientSide);
+    return { ...client, clientSide };
+  };
+  const guest = connect();
+  await tick();
+  guest.client.setProfile({ name: 'Guesty', anilist: '' });
+  host.client.updateSettings({ floors: 2, ...settings });
+  await tick();
+  return { server, host, guest, connect };
+}
+
+test('the host can leave a player\'s AniList out of the pool, and kick a player', async () => {
+  const { server, host, guest } = await createRoom();
+  const guestId = guest.store.state.playerId;
+  const guestRow = () => host.store.state.lobby.players.find((p) => p.id === guestId);
+  assert.equal(guestRow().anilistEnabled, true);
+
+  guest.client.setPlayerAniList(guestId, false);
+  await tick();
+  assert.equal(guestRow().anilistEnabled, true, 'only the host decides');
+  host.client.setPlayerAniList(guestId, false);
+  await tick();
+  assert.equal(guestRow().anilistEnabled, false);
+  assert.equal(guest.store.state.lobby.players.find((p) => p.id === guestId).anilistEnabled, false,
+    'everyone sees it');
+
+  guest.client.kick(host.store.state.playerId);
+  await tick();
+  assert.equal(host.store.state.lobby.players.length, 2, 'only the host kicks');
+  host.client.kick(guestId);
+  await tick();
+  assert.equal(host.store.state.lobby.players.length, 1);
+  assert.equal(guest.store.state.connection.status, 'error');
+  assert.match(guest.store.state.connection.error, /removed you/);
+  server.shutdown();
+});
+
+test('late join: with the option on, a newcomer joins the running game with a name and avatar', async () => {
+  const { server, host, guest, connect } = await createRoom({ lateJoin: true });
+  guest.client.setReady(true);
+  await tick();
+  host.client.startGame('duplicates');
+  await tick();
+  await tick();
+  assert.equal(host.store.state.lobby.phase, 'playing');
+
+  const late = connect();
+  await tick();
+  assert.deepEqual(late.store.state.rejoin, { error: '', pending: false, canJoin: true });
+  assert.equal(late.store.state.avatars.length, 1, 'the avatar catalog comes with the prompt');
+
+  late.client.rejoin(host.store.state.lobby.players.find((p) => p.isHost).name, '');
+  await tick();
+  assert.match(late.store.state.rejoin.error, /taken/, "the host's name is taken");
+
+  late.client.rejoin('Newbie', 'cat.png');
+  await tick();
+  await tick();
+  assert.equal(late.store.state.connection.status, 'connected');
+  assert.ok(late.store.state.run.grid, 'the newcomer gets the game');
+  const newbie = host.store.state.run.players.find((p) => p.name === 'Newbie');
+  assert.equal(newbie.avatar, 'cat.png');
+  assert.deepEqual({ x: newbie.x, y: newbie.y }, late.store.state.run.position);
+  assert.ok(host.store.state.leaderboard.some((entry) => entry.name === 'Newbie'));
+  assert.equal(host.store.state.lobby.players.find((p) => p.name === 'Newbie').anilist, '', 'no AniList');
+  server.shutdown();
+});
+
+test('late join: with the option off, only disconnected players may come back', async () => {
+  const { server, host, guest, connect } = await createRoom();
+  guest.client.setReady(true);
+  await tick();
+  host.client.startGame('duplicates');
+  await tick();
+  await tick();
+  const late = connect();
+  await tick();
+  assert.equal(late.store.state.rejoin.canJoin, false);
+  late.client.rejoin('Newbie', '');
+  await tick();
+  assert.match(late.store.state.rejoin.error, /Nobody with this name/);
+  assert.equal(host.store.state.run.players.length, 2);
+  server.shutdown();
+});
+
+test('every song fits its floor band as well as the pool allows; unheard songs first', () => {
+  // 10 anime x 3 songs = 30 songs, all tagged School: every tile draws from the same 30 songs.
+  const library = makeLibrary();
+  const pool = new SongPool(library, {
+    songTypes: ['OP', 'ED', 'IN'], aniListIds: Array.from({ length: 10 }, (_, i) => 1001 + i),
+  });
+  const session = new GameSession({ pool, settings: { ...DEFAULT_SETTINGS, floors: 6 }, players: [{ id: 'p1', name: 'P1' }] });
+  const context = { session, pool, expedition: session.expedition, me: session.players.get('p1') };
+  const counts = new Map();
+  let tooFar = 0;
+  let needlessRepeats = 0;
+  const record = context.expedition.recordPlay.bind(context.expedition);
+  context.expedition.recordPlay = (areaIndex, song) => {
+    const band = floorBand(context.expedition.floorNumber, 6);
+    const distances = pool.songs.map((s) => bandDistance(s, band)).sort((a, b) => a - b);
+    const allowed = Math.max(DIFFICULTY_MAX_DRIFT, distances[DIFFICULTY_MIN_CANDIDATES - 1]);
+    if (bandDistance(song, band) > allowed) tooFar++;
+    const freshInBand = pool.songs.some((s) => !counts.has(s.id) && bandDistance(s, band) === 0);
+    if (freshInBand && counts.has(song.id)) needlessRepeats++;
+    counts.set(song.id, (counts.get(song.id) ?? 0) + 1);
+    record(areaIndex, song);
+  };
+  for (let floor = 0; floor < 3; floor++) {
+    for (const cell of cellsWith(context.expedition, (c) => c.content === 'key')) walkTo(context, context.me, cell);
+    const door = context.expedition.floor.doors.find((d) => d.areaIndex === NEUTRAL_AREA);
+    walkTo(context, context.me, door.y * context.expedition.floor.size + door.x);
+    session.enterDoor('p1', NEUTRAL_AREA);
+  }
+  const served = [...counts.values()].reduce((a, b) => a + b, 0);
+  assert.ok(served > pool.songs.length, `more tiles than songs, so songs had to repeat (${served})`);
+  assert.equal(tooFar, 0, 'no song far from its floor band while closer ones exist');
+  assert.equal(needlessRepeats, 0, 'no repeat while an unheard song fits the band');
+});
+
+test('an artist leads at most one artist area per game', () => {
+  const anime = [];
+  const songs = [];
+  // 8 artists with 12 songs each.
+  for (let id = 1; id <= 96; id++) {
+    const artist = `Artist ${Math.ceil(id / 12)}`;
+    anime.push([id, 0, `Anime ${id}`, '', [], ['Action'], []]);
+    songs.push([id * 10, id, `Song ${id}`, artist, 1, 1, 50, `${id}.mp3`, [], `a-${artist}`]);
+  }
+  const pool = new SongPool(decodeLibrary({ anime, songs, artists: {} }), { songTypes: ['OP'], aniListIds: null });
+  const rng = createRng('variety');
+  const tags = [];
+  for (let i = 0; i < 10; i++) tags.push(pool.createArtistTag(rng, 15));
+  const created = tags.filter(Boolean);
+  assert.equal(created.length, 4, '8 artists make 4 pairs, then artist areas run out');
+  const names = created.flatMap((tag) => tag.slice(ARTIST_TAG_PREFIX.length).split(' & '));
+  assert.equal(new Set(names).size, names.length, 'no artist appears twice');
+});
+
+test('the host sets how many songs reveal an area\'s key and door', () => {
+  const contentShown = (settings) => {
+    const { session, expedition } = createSession({ settings: { ...DEFAULT_SETTINGS, ...settings } });
+    const grid = session.viewFor('p1').grid;
+    return cellsWith(expedition, (cell) => cell.content === 'key').map((index) => grid.cells[index].content);
+  };
+  assert.ok(contentShown({ revealAfter: 0 }).every((content) => content === 'key'), '0: shown from the start');
+  assert.ok(contentShown({ revealAfter: 3 }).every((content) => content === null), '3: hidden at first');
+
+  const { session, expedition, me, pool } = createSession({ settings: { ...DEFAULT_SETTINGS, revealAfter: 1 } });
+  const context = { session, expedition, me, pool };
+  const sector = cellsWith(expedition, (cell) => cell.areaIndex === 0);
+  const entry = [...sector].sort((a, b) => pathTo(expedition, me, a).length - pathTo(expedition, me, b).length)[0];
+  walkTo(context, me, entry);
+  const key = sector.find((index) => expedition.floor.cells[index].content === 'key');
+  assert.equal(session.viewFor('p1').grid.cells[key].content, 'key', '1 song is enough');
 });

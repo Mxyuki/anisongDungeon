@@ -36,6 +36,7 @@ $MimeTypes = @{
   '.png'   = 'image/png'
   '.webp'  = 'image/webp'
   '.gif'   = 'image/gif'
+  '.mp3'   = 'audio/mpeg'
   '.jpg'   = 'image/jpeg'
   '.jpeg'  = 'image/jpeg'
   '.ico'   = 'image/x-icon'

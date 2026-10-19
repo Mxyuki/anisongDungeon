@@ -10,7 +10,7 @@ import {
 import { createRng } from '../app/src/core/rng.js';
 import { normalizeText, normalizeWithMap, similarity } from '../app/src/core/text.js';
 import { buildAnswerKeys, findMatchingAnswer, isCorrectAnswer } from '../app/src/game/answers.js';
-import { floorDifficulty, pickSong, targetGuessRate } from '../app/src/game/difficulty.js';
+import { floorBand, songsForBand } from '../app/src/game/difficulty.js';
 import {
   cellIndex,
   countEntrances,
@@ -91,20 +91,46 @@ test('settings are clamped and keep at least one song type', () => {
   assert.equal(sanitizeSettings({ artistAreas: 'nope' }).artistAreas, 'shown');
 });
 
-test('difficulty rises with floors and picks songs near the target', () => {
-  assert.equal(floorDifficulty(1, 5), 0);
-  assert.equal(floorDifficulty(4, 5), 1);
-  assert.ok(targetGuessRate(0) > targetGuessRate(1));
+test('each floor has its own guess-rate band, in equal steps from 80-100 to 0-15', () => {
+  const bands = [1, 2, 3, 4, 5].map((floor) => floorBand(floor, 5));
+  assert.deepEqual([bands[0].min, bands[0].max], [80, 100]);
+  assert.deepEqual([bands[4].min, bands[4].max], [0, 15]);
+  assert.deepEqual(bands[4].ideal, { min: 0, max: 10 }, 'the last floor aims at 0-10 when it can');
+  assert.equal(bands[0].ideal, null);
+  const steps = bands.slice(1).map((band, i) => bands[i].min - band.min);
+  assert.ok(steps.every((step) => step === steps[0]), 'equal steps between floors');
+  assert.deepEqual([floorBand(1, 1).min, floorBand(1, 1).max], [80, 100], 'a 1-floor game is easy');
+});
 
-  const songs = Array.from({ length: 100 }, (_, id) => ({ id, guessRate: id }));
-  const rng = createRng(1);
-  const easy = Array.from({ length: 50 }, () => pickSong({ rng, candidates: songs, difficulty: 0 }));
-  const hard = Array.from({ length: 50 }, () => pickSong({ rng, candidates: songs, difficulty: 1 }));
-  const mean = (list) => list.reduce((sum, song) => sum + song.guessRate, 0) / list.length;
-  assert.ok(mean(easy) > mean(hard) + 25);
+test('songs are picked by band: inside it, else the closest ones, never far away', () => {
+  const song = (id, guessRate) => ({ id, guessRate });
+  const all = Array.from({ length: 101 }, (_, rate) => song(rate, rate));
+  const rates = (songs) => songs.map((s) => s.guessRate).sort((a, b) => a - b);
+  const first = floorBand(1, 5);
+  assert.deepEqual(rates(songsForBand(all, first)), Array.from({ length: 21 }, (_, i) => 80 + i));
 
-  const played = new Set(songs.slice(1).map((s) => s.id));
-  assert.equal(pickSong({ rng, candidates: songs, difficulty: 0, excludeIds: played }).id, 0);
+  const middling = Array.from({ length: 11 }, (_, i) => song(i, 50 + i));
+  assert.deepEqual(rates(songsForBand(middling, first)), [55, 56, 57, 58, 59, 60],
+    'too few in the band: the closest songs, not random ones');
+
+  const last = floorBand(5, 5);
+  assert.ok(songsForBand(all, last).every((s) => s.guessRate <= 10), 'enough songs: 0-10');
+  const fewEasy = [song(1, 3), song(2, 8), song(3, 12), song(4, 13), song(5, 14), song(6, 15), song(7, 40)];
+  assert.deepEqual(rates(songsForBand(fewEasy, last)), [3, 8, 12, 13, 14, 15], 'else 0-15');
+});
+
+test('within the band, unheard songs first; a far unheard song never beats a fitting repeat', () => {
+  const band = floorBand(1, 5);
+  const songs = Array.from({ length: 8 }, (_, id) => ({ id, guessRate: 90 }));
+  const plays = new Map([[0, 1], [1, 1]]);
+  const playCount = (s) => plays.get(s.id) ?? 0;
+  assert.ok(songsForBand(songs, band, playCount).every((s) => playCount(s) === 0));
+
+  const played = Array.from({ length: 6 }, (_, id) => ({ id, guessRate: 90 }));
+  const farFresh = [{ id: 10, guessRate: 30 }];
+  const allPlayed = (s) => (s.id < 10 ? 1 : 0);
+  assert.ok(songsForBand([...played, ...farFresh], band, allPlayed).every((s) => s.guessRate === 90),
+    'a song 50% out of the band is not worth avoiding a repeat');
 });
 
 test('pickTags pads with null when the pool is small and avoids used tags', () => {
@@ -214,5 +240,5 @@ test('season range settings are clamped and kept in order', () => {
   const movedFrom = sanitizeSettings({ fromYear: 2015 }, on);
   assert.deepEqual([movedFrom.toYear, movedFrom.toSeason], [2015, 1], 'moving the start drags the end');
   assert.equal(sanitizeSettings({ anySeason: 'yes' }).anySeason, false, 'booleans only');
-  assert.equal(songsNeeded({ ...base, floors: 5, tilesPerArea: 15 }), 4 * 4 * 15);
+  assert.equal(songsNeeded({ ...base, floors: 5, tilesPerArea: 15 }), 5 * 4 * 15);
 });

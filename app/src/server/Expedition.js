@@ -1,4 +1,4 @@
-import { AREA_REVEAL_GUESSES } from '../config.js';
+import { DEFAULT_SETTINGS } from '../config.js';
 import { cellIndex, getVisibleCells, NEUTRAL_AREA, VOID_AREA } from '../game/dungeon.js';
 
 /** @typedef {import('../game/types.js').Floor} Floor */
@@ -31,12 +31,18 @@ import { cellIndex, getVisibleCells, NEUTRAL_AREA, VOID_AREA } from '../game/dun
  */
 export class Expedition {
   /** @type {Floor | null} */ floor = null;
+  /** Songs guessed in an area before its key and door are shown (host setting revealAfter). */
+  revealAfter = DEFAULT_SETTINGS.revealAfter;
   floorNumber = 1;
   /** @type {Set<number>} */ cleared = new Set();
   /** @type {Map<number, TileSong>} */ tileSongs = new Map();
   /** @type {Map<number, TileProgress>} */ tileProgress = new Map();
   /** @type {Map<number, object>} Revealed answer of each explored tile (shown when standing on it). */
   solvedAnswers = new Map();
+  /** @type {Map<number, string[]>} Names of the players who solved each explored tile. */
+  solvers = new Map();
+  /** @type {Map<number, { song: Song, by: string }[]>} Songs rerolled away on each tile, in order. */
+  rerolledSongs = new Map();
   /** @type {Set<number>} Sectors whose outline the team has uncovered. */
   discoveredAreas = new Set();
   /** @type {Record<number, number>} Correct guesses per area (neutral included) on this floor. */
@@ -54,6 +60,8 @@ export class Expedition {
   doorRoll = null;
   /** @type {Set<number>} Songs already served this game (avoids repeats). */
   playedSongIds = new Set();
+  /** @type {Map<number, number>} Times each song was served this game (repeats go to the least played). */
+  #songPlays = new Map();
   /** @type {Map<number, Map<number, number>>} Area → anime id → songs served there this floor. */
   #animePlays = new Map();
   challengeCount = 0;
@@ -80,6 +88,8 @@ export class Expedition {
     this.tileSongs.clear();
     this.tileProgress.clear();
     this.solvedAnswers.clear();
+    this.solvers.clear();
+    this.rerolledSongs.clear();
     this.discoveredAreas.clear();
     this.areaGuesses = Object.fromEntries(
       [NEUTRAL_AREA, ...floor.areas.map((area) => area.index)].map((index) => [index, 0]),
@@ -101,19 +111,39 @@ export class Expedition {
   }
 
   /**
+   * How many times a song was served this game, every floor included.
+   * @param {number} songId
+   */
+  songPlayCount(songId) {
+    return this.#songPlays.get(songId) ?? 0;
+  }
+
+  /**
    * Remembers that a song was served on a tile of an area.
    * @param {number} areaIndex
    * @param {Song} song
    */
   recordPlay(areaIndex, song) {
     this.playedSongIds.add(song.id);
+    this.#songPlays.set(song.id, (this.#songPlays.get(song.id) ?? 0) + 1);
     if (!this.#animePlays.has(areaIndex)) this.#animePlays.set(areaIndex, new Map());
     const plays = this.#animePlays.get(areaIndex);
     plays.set(song.animeId, (plays.get(song.animeId) ?? 0) + 1);
   }
 
   /**
-   * @param {number} floorNumber  The final floor reached.
+   * Remembers a song that was rerolled away (shown in the post-game map review).
+   * @param {number} index
+   * @param {Song} song
+   * @param {string} by  Name of the player who rerolled.
+   */
+  recordReroll(index, song, by) {
+    if (!this.rerolledSongs.has(index)) this.rerolledSongs.set(index, []);
+    this.rerolledSongs.get(index).push({ song, by });
+  }
+
+  /**
+   * @param {number} floorNumber  The last floor played (its door led to the summit).
    * @param {number} now
    */
   finish(floorNumber, now) {
@@ -146,7 +176,7 @@ export class Expedition {
 
   /** @param {number} areaIndex  Sector index or NEUTRAL_AREA. */
   isAreaRevealed(areaIndex) {
-    return this.areaGuesses[areaIndex] >= AREA_REVEAL_GUESSES;
+    return this.areaGuesses[areaIndex] >= this.revealAfter;
   }
 
   /**

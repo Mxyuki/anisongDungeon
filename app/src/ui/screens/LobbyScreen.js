@@ -29,19 +29,30 @@ const ANSWER_SCOPES = [
   { anySeason: false, key: 'EXACT', label: 'This anime only' },
   { anySeason: true, key: 'ANY', label: 'Any season' },
 ];
+/** Mid-game joins: only the lobby's players, or anyone with the room code. */
+const LATE_JOIN_OPTIONS = [
+  { lateJoin: false, key: 'CLOSED', label: 'Lobby players only' },
+  { lateJoin: true, key: 'OPEN', label: 'Anyone with the code' },
+];
+/** How long a Kick button waits for its confirmation click. */
+const KICK_CONFIRM_MS = 3000;
 /** Ends of the season range: settings keys of each end's year and season. */
 const RANGE_ENDS = [
   { label: 'From', year: 'fromYear', season: 'fromSeason' },
   { label: 'To', year: 'toYear', season: 'toSeason' },
 ];
 
-/** Numeric host settings rendered as steppers. Add new numeric settings here. */
+/**
+ * Numeric host settings rendered as steppers. Add new numeric settings here. The hint shows on
+ * hover (the panel stays short).
+ */
 const SETTING_FIELDS = [
-  { key: 'tilesPerArea', label: 'Tiles per genre area', unit: '', step: 1, hint: 'Size of each themed area on a floor.' },
-  { key: 'floors', label: 'Floors to climb', unit: 'F', step: 1, hint: 'Reaching this floor ends the expedition.' },
+  { key: 'tilesPerArea', label: 'Tiles per area', unit: '', step: 1, hint: 'Size of each themed area on a floor.' },
+  { key: 'revealAfter', label: 'Songs to locate', unit: '', step: 1, hint: 'Songs guessed in an area before its key and door are marked on the map (0 = shown from the start).' },
+  { key: 'floors', label: 'Floors', unit: 'F', step: 1, hint: 'Every floor is played; the last floor\'s door leads to the summit.' },
   { key: 'timeLimitMin', label: 'Time limit', unit: 'min', step: 5, hint: 'Results are shown when time runs out.' },
   { key: 'rerollIntervalSec', label: 'Reroll every', unit: 'sec', step: 5, hint: 'Each player regains a reroll on this cooldown.' },
-  { key: 'maxRerolls', label: 'Max stored rerolls', unit: '', step: 1, hint: 'Cooldown pauses when a player holds this many.' },
+  { key: 'maxRerolls', label: 'Max rerolls', unit: '', step: 1, hint: 'Cooldown pauses when a player holds this many.' },
 ];
 
 /**
@@ -56,6 +67,10 @@ export class LobbyScreen {
   #context = { me: null, isHost: false };
   /** Catalog the avatar picker was built from (rebuilt when the host's catalog changes). */
   #renderedAvatars = null;
+  /** Player whose Kick button waits for a confirmation click. */
+  #kickArmed = null;
+  #kickTimer = null;
+  #lastState = null;
 
   /** @param {{ client: import('../../client/GameClient.js').GameClient }} options */
   constructor({ client }) {
@@ -75,6 +90,7 @@ export class LobbyScreen {
 
   unmount() {
     clearTimeout(this.#saveTimer);
+    clearTimeout(this.#kickTimer);
     window.removeEventListener('keydown', this.#keyListener);
     this.#root.remove();
   }
@@ -195,33 +211,50 @@ export class LobbyScreen {
     }, h('span', { class: 'toggle__key', text: scope.key }), h('span', { text: scope.label })));
     els.scopeHint = h('p', { class: 'hint' });
 
+    els.lateJoinButtons = LATE_JOIN_OPTIONS.map((option) => h('button', {
+      class: 'toggle',
+      type: 'button',
+      dataset: { late: String(option.lateJoin) },
+      onClick: () => this.#client.updateSettings({ lateJoin: option.lateJoin }),
+    }, h('span', { class: 'toggle__key', text: option.key }), h('span', { text: option.label })));
+
     els.steppers = {};
     const fields = SETTING_FIELDS.map((field) => this.#buildStepper(field));
     els.settingsNote = h('p', { class: 'hint' });
 
-    return panel({ title: 'Mission Parameters', code: 'CFG // 03', className: 'lobby__settings' },
+    // Two columns so the panel stays about as tall as the rest of the lobby.
+    const songs = h('div', { class: 'settings__column' },
+      h('p', { class: 'settings__heading', text: '// Songs' }),
       h('div', { class: 'setting' },
         h('span', { class: 'field__label', text: 'Song types' }),
         h('div', { class: 'toggle-group' }, els.typeButtons),
-        h('p', { class: 'hint', text: `A theme needs ${MIN_SONGS_PER_TAG}+ songs in the combined lists to appear.` })),
-      h('div', { class: 'setting' },
-        h('span', { class: 'field__label', text: 'Answer mode' }),
-        h('div', { class: 'toggle-group toggle-group--2' }, els.modeButtons),
-        h('p', { class: 'hint', text: 'Anime: name the anime. S/A: name the song AND its artist (a group member or alias counts).' })),
-      h('div', { class: 'setting' },
-        h('span', { class: 'field__label', text: 'Accepted anime names' }),
-        h('div', { class: 'toggle-group toggle-group--2' }, els.scopeButtons),
-        els.scopeHint),
+        h('p', { class: 'hint', text: `A theme needs ${MIN_SONGS_PER_TAG}+ songs to appear.` })),
       h('div', { class: 'setting' },
         h('span', { class: 'field__label', text: 'Song pool' }),
         h('div', { class: 'toggle-group toggle-group--2' }, els.sourceButtons),
         h('div', { class: 'season-range' }, rangeRows),
-        h('p', { class: 'hint', text: 'Season range: only anime first aired between these seasons play (lists and library alike).' })),
+        h('p', { class: 'hint', text: 'Only anime first aired in this range play (lists and library alike).' })),
       h('div', { class: 'setting' },
         h('span', { class: 'field__label', text: 'Artist areas' }),
         h('div', { class: 'toggle-group' }, els.artistButtons),
-        els.artistHint),
+        els.artistHint));
+    const expedition = h('div', { class: 'settings__column' },
+      h('p', { class: 'settings__heading', text: '// Expedition' }),
+      h('div', { class: 'setting' },
+        h('span', { class: 'field__label', text: 'Answer mode' }),
+        h('div', { class: 'toggle-group toggle-group--2' }, els.modeButtons),
+        h('p', { class: 'hint', text: 'S/A: name the song AND its artist (a group member or alias counts).' })),
+      h('div', { class: 'setting' },
+        h('span', { class: 'field__label', text: 'Accepted anime names' }),
+        h('div', { class: 'toggle-group toggle-group--2' }, els.scopeButtons),
+        els.scopeHint),
       fields,
+      h('div', { class: 'setting' },
+        h('span', { class: 'field__label', text: 'Join mid-game' }),
+        h('div', { class: 'toggle-group toggle-group--2' }, els.lateJoinButtons),
+        h('p', { class: 'hint', text: 'Open: anyone with the code can join a running game (name + avatar, no AniList).' })));
+    return panel({ title: 'Mission Parameters', code: 'CFG // 03', className: 'lobby__settings' },
+      h('div', { class: 'settings' }, songs, expedition),
       els.settingsNote).root;
   }
 
@@ -283,9 +316,8 @@ export class LobbyScreen {
     const plus = h('button', { class: 'stepper__btn', type: 'button', onClick: () => change(step), 'aria-label': `Increase ${label}` }, '+');
     this.#els.steppers[key] = { value, minus, plus, unit, limits };
     return h('div', { class: 'setting setting--row' },
-      h('div', { class: 'setting__text' },
-        h('span', { class: 'setting__label', text: label }),
-        h('span', { class: 'hint', text: hint })),
+      h('div', { class: 'setting__text', title: hint },
+        h('span', { class: 'setting__label', text: label })),
       h('div', { class: 'stepper' }, minus, value, plus));
   }
 
@@ -342,6 +374,7 @@ export class LobbyScreen {
   update(state) {
     const { lobby, playerId, isHost } = state;
     if (!lobby) return;
+    this.#lastState = state;
     const me = lobby.players.find((player) => player.id === playerId) ?? null;
     this.#context = { me, isHost };
     this.#lastSettings = lobby.settings;
@@ -352,7 +385,7 @@ export class LobbyScreen {
     this.#renderListStatuses(me);
     this.#renderAvatars(state.avatars, me);
     this.#renderAction(lobby, me, isHost);
-    this.#renderRoster(lobby, playerId, avatarsById);
+    this.#renderRoster(lobby, playerId, avatarsById, isHost);
     this.#renderSettings(lobby.settings, isHost);
     this.#renderShortage(isHost ? state.poolShortage : null, lobby.settings);
   }
@@ -364,7 +397,7 @@ export class LobbyScreen {
     if (!shortage) return;
     const source = shortage.fromLists ? 'Your AniList lists have' : 'The library has';
     setText(els.shortageText, `${source} ${shortage.songCount} songs matching the settings, but `
-      + `${settings.floors - 1} floors of ${settings.tilesPerArea}-tile areas need about ${shortage.needed}.`);
+      + `${settings.floors} floors of ${settings.tilesPerArea}-tile areas need about ${shortage.needed}.`);
     const { fill, duplicates } = els.shortageButtons;
     fill.disabled = !shortage.canFill;
     fill.title = shortage.canFill ? '' : 'No other library song matches these settings.';
@@ -432,14 +465,16 @@ export class LobbyScreen {
     setText(actionHint, ready ? 'Waiting for the host to start.' : 'Set your name and AniList, then ready up.');
   }
 
-  #renderRoster(lobby, playerId, avatarsById) {
+  #renderRoster(lobby, playerId, avatarsById, isHost) {
     setText(this.#els.rosterCount, `${pad2(lobby.players.length)} // LINKED`);
     replaceChildren(this.#els.roster, lobby.players.map((player, index) => {
       const anilist = player.anilistStatus;
       const anilistText = !player.anilist ? 'No AniList'
-        : anilist.state === 'ok' ? `${player.anilist} · ${anilist.count} anime`
-          : anilist.state === 'checking' ? `${player.anilist} · checking…`
-            : `${player.anilist} · not found`;
+        : !player.anilistEnabled ? `${player.anilist} · list off (host)`
+          : anilist.state === 'ok' ? `${player.anilist} · ${anilist.count} anime`
+            : anilist.state === 'checking' ? `${player.anilist} · checking…`
+              : `${player.anilist} · not found`;
+      const listState = player.anilist && !player.anilistEnabled ? 'off' : anilist.state;
       return h('li', { class: `operator${player.id === playerId ? ' operator--me' : ''}` },
         h('span', { class: 'operator__index', text: pad2(index + 1) }),
         playerToken(player, avatarsById, { className: 'operator__token' }),
@@ -448,14 +483,15 @@ export class LobbyScreen {
             player.isHost && icon('crown', 'operator__crown'),
             player.name,
             player.id === playerId && h('span', { class: 'operator__you', text: 'YOU' })),
-          h('span', { class: `operator__anilist operator__anilist--${anilist.state}`, text: anilistText })),
+          h('span', { class: `operator__anilist operator__anilist--${listState}`, text: anilistText })),
+        h('div', { class: 'operator__controls' }, isHost && this.#hostControls(player)),
         h('span', {
           class: `badge ${player.ready ? 'badge--ready' : 'badge--idle'}`,
           text: player.isHost ? 'HOST' : player.ready ? 'READY' : 'STANDBY',
         }));
     }));
 
-    const linked = lobby.players.filter((p) => p.anilistStatus.state === 'ok').length;
+    const linked = lobby.players.filter((p) => p.anilistEnabled && p.anilistStatus.state === 'ok').length;
     const { settings } = lobby;
     const seasons = settings.seasonRange
       ? ` Only anime aired from ${SEASONS[settings.fromSeason]} ${settings.fromYear} to ${SEASONS[settings.toSeason]} ${settings.toYear}.`
@@ -463,6 +499,41 @@ export class LobbyScreen {
     setText(this.#els.source, (linked > 0
       ? `Song pool: anime from ${linked} linked AniList list${linked > 1 ? 's' : ''}.`
       : 'Song pool: no AniList linked — random songs from the full library.') + seasons);
+  }
+
+  /** Host buttons of a roster row: AniList on/off (players with a list) and Kick (not the host). */
+  #hostControls(player) {
+    const listToggle = player.anilist && h('button', {
+      class: `chip-toggle${player.anilistEnabled ? ' chip-toggle--active' : ''}`,
+      type: 'button',
+      title: player.anilistEnabled ? 'Leave this list out of the song pool' : 'Use this list in the song pool',
+      'aria-pressed': String(player.anilistEnabled),
+      onClick: () => this.#client.setPlayerAniList(player.id, !player.anilistEnabled),
+    }, player.anilistEnabled ? 'List on' : 'List off');
+    const armed = this.#kickArmed === player.id;
+    const kick = !player.isHost && h('button', {
+      class: `btn btn--ghost btn--danger operator__kick${armed ? ' operator__kick--armed' : ''}`,
+      type: 'button',
+      title: `Remove ${player.name} from the room`,
+      onClick: () => this.#onKick(player.id),
+    }, armed ? 'Confirm?' : 'Kick');
+    return [listToggle, kick];
+  }
+
+  /** First click arms the button, a second click within KICK_CONFIRM_MS kicks. */
+  #onKick(id) {
+    clearTimeout(this.#kickTimer);
+    if (this.#kickArmed === id) {
+      this.#kickArmed = null;
+      this.#client.kick(id);
+      return;
+    }
+    this.#kickArmed = id;
+    this.#kickTimer = setTimeout(() => {
+      this.#kickArmed = null;
+      if (this.#lastState) this.update(this.#lastState);
+    }, KICK_CONFIRM_MS);
+    if (this.#lastState) this.update(this.#lastState);
   }
 
   #renderSettings(settings, isHost) {
@@ -481,7 +552,7 @@ export class LobbyScreen {
       button.setAttribute('aria-pressed', String(active));
     }
     setText(this.#els.artistHint, artistAreasApply
-      ? `Some sectors only play songs of 2 artists. Show their names, hide them ("${ARTIST_TAG_HIDDEN}"), or turn these areas off.`
+      ? `Some sectors only play 2 artists' songs. Hidden: "${ARTIST_TAG_HIDDEN}".`
       : 'Anime mode only: in S/A mode the area name would give the artist away.');
     for (const button of this.#els.scopeButtons) {
       const active = String(settings.anySeason) === button.dataset.any;
@@ -491,10 +562,16 @@ export class LobbyScreen {
     }
     setText(this.#els.scopeHint, !artistAreasApply ? 'Anime mode only.'
       : settings.anySeason
-        ? 'Any entry of the franchise counts: "Attack on Titan" is right for a Season 3 song.'
-        : 'Only the anime\'s Japanese/English names and its alternative answers count, not other seasons.');
+        ? 'Any season counts: "Attack on Titan" is right for a Season 3 song.'
+        : 'Only this anime\'s names and alternative answers, not other seasons.');
     for (const button of this.#els.sourceButtons) {
       const active = String(settings.seasonRange) === button.dataset.range;
+      button.classList.toggle('toggle--active', active);
+      button.disabled = !isHost;
+      button.setAttribute('aria-pressed', String(active));
+    }
+    for (const button of this.#els.lateJoinButtons) {
+      const active = String(settings.lateJoin) === button.dataset.late;
       button.classList.toggle('toggle--active', active);
       button.disabled = !isHost;
       button.setAttribute('aria-pressed', String(active));

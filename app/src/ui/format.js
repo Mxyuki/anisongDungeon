@@ -2,6 +2,10 @@ import { SONG_TYPES } from '../config.js';
 
 /** Display helpers shared by screens. */
 
+/** Area index of the neutral hub (mirrors game/dungeon.js, which the UI may not import). */
+export const NEUTRAL_AREA = -1;
+export const SECTOR_LETTERS = ['A', 'B', 'C', 'D', 'E'];
+
 /**
  * @param {string | null} tag
  * @returns {string}

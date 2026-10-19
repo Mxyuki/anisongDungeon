@@ -1,5 +1,6 @@
 import {
   AREA_COUNT,
+  DIFFICULTY_MAX_DRIFT,
   ARTIST_AREA_CHANCE,
   ARTIST_TAG_HIDDEN,
   ARTIST_TAG_PREFIX,
@@ -13,8 +14,10 @@ import {
 import { Emitter } from '../core/emitter.js';
 import { createRandomRng, createRng } from '../core/rng.js';
 import { findMatchingAnswer, isCorrectAnswer } from '../game/answers.js';
-import { floorDifficulty, pickSong } from '../game/difficulty.js';
-import { areAdjacent, cellCoords, cellIndex, generateFloor, NEUTRAL_AREA, pickTags } from '../game/dungeon.js';
+import { bandDistance, floorBand, songsForBand } from '../game/difficulty.js';
+import {
+  areAdjacent, cellCoords, cellIndex, generateFloor, NEUTRAL_AREA, pickTags, VOID_AREA,
+} from '../game/dungeon.js';
 import { Expedition } from './Expedition.js';
 import { PlayerState } from './PlayerState.js';
 
@@ -56,6 +59,9 @@ export class GameSession extends Emitter {
   #timer = null;
   #rollTimer = null;
   #rollCount = 0;
+  /** Post-game review of every floor played (see #archiveFloor), oldest first. */
+  #floorReviews = [];
+  #currentFloorArchived = false;
   ended = false;
   startedAt;
   endsAt;
@@ -76,24 +82,44 @@ export class GameSession extends Emitter {
     this.#settings = settings;
     this.#seed = Math.floor(this.#rng.next() * 2 ** 32);
     this.#tagPool = this.#themes();
+    this.expedition.revealAfter = settings.revealAfter;
     this.startedAt = now;
     this.endsAt = now + settings.timeLimitMin * 60_000;
 
     const firstRng = createRng(`${this.#seed}:first`);
     const firstTags = this.#withArtistAreas(firstRng, pickTags(firstRng, this.#tagPool, AREA_COUNT));
     this.expedition.enterFloor(this.#buildFloor(1, firstTags));
-    const rerolls = Math.min(STARTING_REROLLS, settings.maxRerolls);
-    for (const player of players) {
-      this.players.set(player.id, new PlayerState({
-        playerId: player.id,
-        name: player.name,
-        avatar: player.avatar ?? '',
-        color: player.color ?? 0,
-        position: this.expedition.startIndex,
-        rerolls,
-        nextRerollAt: rerolls < settings.maxRerolls ? now + this.#rerollIntervalMs : null,
-      }));
-    }
+    for (const player of players) this.#createPlayer(player, now);
+  }
+
+  /** A new dot at the entrance of the current floor, with the starting rerolls. */
+  #createPlayer(player, now) {
+    const rerolls = Math.min(STARTING_REROLLS, this.#settings.maxRerolls);
+    const state = new PlayerState({
+      playerId: player.id,
+      name: player.name,
+      avatar: player.avatar ?? '',
+      color: player.color ?? 0,
+      position: this.expedition.startIndex,
+      rerolls,
+      nextRerollAt: rerolls < this.#settings.maxRerolls ? now + this.#rerollIntervalMs : null,
+    });
+    this.players.set(player.id, state);
+    return state;
+  }
+
+  /**
+   * Late join: a new player starts at the entrance of the current floor.
+   * @param {{id: string, name: string, avatar?: string, color?: number}} player
+   * @param {number} [now]
+   * @returns {boolean} False when the game is over or the player already plays.
+   */
+  addPlayer(player, now = Date.now()) {
+    if (this.ended || this.expedition.finished || this.players.has(player.id)) return false;
+    this.#createPlayer(player, now);
+    this.emit('positions');
+    this.emit('leaderboard');
+    return true;
   }
 
   get settings() {
@@ -207,13 +233,10 @@ export class GameSession extends Emitter {
     const { expedition } = this;
     const cell = expedition.floor.cells[index];
     const tag = cell.areaIndex >= 0 ? expedition.floor.areas[cell.areaIndex].tag : null;
-    const song = pickSong({
-      rng: this.#rng,
-      candidates: this.#candidatesFor(tag, cell.areaIndex),
-      difficulty: floorDifficulty(expedition.floorNumber, this.#settings.floors),
-      excludeIds: expedition.playedSongIds,
-    });
-    if (!song) return false;
+    const band = floorBand(expedition.floorNumber, this.#settings.floors);
+    const candidates = this.#candidatesFor(tag, cell.areaIndex, band);
+    if (candidates.length === 0) return false;
+    const song = this.#rng.pick(candidates);
     expedition.recordPlay(cell.areaIndex, song);
     expedition.tileSongs.set(index, {
       song,
@@ -224,25 +247,46 @@ export class GameSession extends Emitter {
     return true;
   }
 
-  /** The pool tiles of a theme draw from: the fill pool once the main pool has nothing new. */
-  #sourceFor(tag) {
-    const fill = this.#fillPool;
-    if (!fill) return this.#pool;
-    if (tag && !this.#pool.hasTheme(tag)) return fill;
-    if (tag && !fill.hasTheme(tag)) return this.#pool; // artist areas exist in one pool only
-    const played = this.expedition.playedSongIds;
-    return this.#pool.candidatesFor(tag).some((song) => !played.has(song.id)) ? this.#pool : fill;
-  }
-
   /**
-   * Songs matching the area's theme, minus anime that already reached their quota in this area.
-   * Falls back to the whole theme if the quota would leave nothing.
+   * Songs a tile may draw. Difficulty comes first: songsForBand (game/difficulty.js) keeps the
+   * songs closest to the floor's band, unheard ones first. The options below are tried in order
+   * and the first one that stays within DIFFICULTY_MAX_DRIFT of the band wins:
+   *   lists with the anime quota (MAX_SONGS_PER_ANIME_PER_AREA), lists without it,
+   *   then (fill pool) the library with the quota, without it.
+   * The lists only count as fitting if they still have an unheard song (else the fill pool tops
+   * them up). When nothing fits, the option whose songs are closest to the band is used.
+   * Finally songs already waiting on another tile (or being rerolled away) are skipped.
    */
-  #candidatesFor(tag, areaIndex) {
-    const themed = this.#sourceFor(tag).candidatesFor(tag);
-    const allowed = themed.filter((song) =>
-      this.expedition.animePlayCount(areaIndex, song.animeId) < MAX_SONGS_PER_ANIME_PER_AREA);
-    return allowed.length > 0 ? allowed : themed;
+  #candidatesFor(tag, areaIndex, band) {
+    const { expedition } = this;
+    const plays = (song) => expedition.songPlayCount(song.id);
+    const underQuota = (songs) => songs.filter((song) =>
+      expedition.animePlayCount(areaIndex, song.animeId) < MAX_SONGS_PER_ANIME_PER_AREA);
+    const fits = (songs, needFresh) => songs.length > 0
+      && songs.every((song) => bandDistance(song, band) <= DIFFICULTY_MAX_DRIFT)
+      && (!needFresh || songs.some((song) => plays(song) === 0));
+
+    const fill = this.#fillPool;
+    // Artist areas exist in one pool only.
+    const inList = !tag || this.#pool.hasTheme(tag);
+    const inFill = Boolean(fill) && (!tag || fill.hasTheme(tag));
+    const sources = [
+      inList && { songs: this.#pool.candidatesFor(tag), needFresh: inFill },
+      inFill && { songs: fill.candidatesFor(tag), needFresh: false },
+    ].filter(Boolean);
+    const options = sources.flatMap(({ songs, needFresh }) => [
+      { songs: underQuota(songs), needFresh },
+      { songs, needFresh },
+    ]).map(({ songs, needFresh }) => ({ picked: songsForBand(songs, band, plays), needFresh }));
+
+    const farthest = (songs) => Math.max(...songs.map((song) => bandDistance(song, band)));
+    const chosen = options.find(({ picked, needFresh }) => fits(picked, needFresh))
+      ?? options.filter(({ picked }) => picked.length > 0)
+        .reduce((best, option) => (!best || farthest(option.picked) < farthest(best.picked) ? option : best), null);
+    const songs = chosen?.picked ?? [];
+    const busy = new Set([...expedition.tileSongs.values()].map((tile) => tile.song.id));
+    const free = songs.filter((song) => !busy.has(song.id));
+    return free.length > 0 ? free : songs;
   }
 
   /**
@@ -273,10 +317,14 @@ export class GameSession extends Emitter {
   #solveTile(player, challenge, contributorIds, guess) {
     const index = player.position;
     const answer = this.#describeSong(challenge.song);
+    const solvers = [];
     for (const id of new Set(contributorIds)) {
       const contributor = this.players.get(id);
-      if (contributor) contributor.stats.guessed++;
+      if (!contributor) continue;
+      contributor.stats.guessed++;
+      solvers.push(contributor.name);
     }
+    this.expedition.solvers.set(index, solvers);
     const reward = this.expedition.clearCell(index, answer);
     for (const teammate of this.#playersOn(index, player.playerId)) {
       this.emit('result', teammate.playerId, { kind: 'teammate', by: player.name, reward, answer });
@@ -383,6 +431,7 @@ export class GameSession extends Emitter {
     if (!challenge) return fail('Step onto an unexplored tile before rerolling.');
     if (player.rerolls <= 0) return fail('No reroll available yet.');
     if (!this.#assignSong(player.position)) return fail('No other song available.');
+    this.expedition.recordReroll(player.position, challenge.song, player.name);
     this.expedition.tileProgress.delete(player.position); // a new song starts from scratch
     player.rerolls--;
     player.stats.rerollsUsed++;
@@ -479,14 +528,17 @@ export class GameSession extends Emitter {
     const { expedition } = this;
     const door = expedition.floor.doors.find((candidate) => candidate.areaIndex === areaIndex);
     const nextFloor = expedition.floorNumber + 1;
-    if (nextFloor >= this.#settings.floors) {
-      expedition.finish(nextFloor, now);
+    this.#archiveFloor();
+    // The last floor's door leads to the summit: every one of settings.floors floors is played.
+    if (expedition.floorNumber >= this.#settings.floors) {
+      expedition.finish(expedition.floorNumber, now);
       this.emit('announce', `${opener}. The summit is reached!`);
       this.emit('leaderboard');
       this.end();
       return;
     }
     expedition.enterFloor(this.#buildFloor(nextFloor, door.tags));
+    this.#currentFloorArchived = false;
     for (const other of this.players.values()) other.position = expedition.startIndex;
     this.emit('announce', `${opener}: welcome to floor ${nextFloor}.`);
     this.emit('floor');
@@ -528,6 +580,7 @@ export class GameSession extends Emitter {
 
   end() {
     if (this.ended) return;
+    if (!this.#currentFloorArchived) this.#archiveFloor();
     this.ended = true;
     this.stop();
     this.emit('end', this.results());
@@ -597,6 +650,38 @@ export class GameSession extends Emitter {
     };
   }
 
+  /**
+   * Saves the current floor for the post-game map review: the whole map (no fog) and, per tile,
+   * its answer and solvers, the song left unanswered, and the songs rerolled away. The game is
+   * over when this is sent, so answers and real themes can be shown.
+   */
+  #archiveFloor() {
+    const { expedition } = this;
+    const { floor } = expedition;
+    const describeRerolls = (index) => (expedition.rerolledSongs.get(index) ?? [])
+      .map(({ song, by }) => ({ answer: this.#describeSong(song), by }));
+    this.#floorReviews.push({
+      number: expedition.floorNumber,
+      size: floor.size,
+      areas: floor.areas.map((area) => ({ index: area.index, tag: area.tag })),
+      cells: floor.cells.map((cell, index) => {
+        if (cell.areaIndex === VOID_AREA) return { state: 'void' };
+        const cleared = expedition.cleared.has(index);
+        const pending = expedition.tileSongs.get(index);
+        return {
+          area: cell.areaIndex,
+          content: cell.content,
+          state: cleared ? 'answered' : pending ? 'unanswered' : 'unvisited',
+          answer: cleared ? expedition.solvedAnswers.get(index) ?? null
+            : pending ? this.#describeSong(pending.song) : null,
+          solvers: expedition.solvers.get(index) ?? [],
+          rerolls: describeRerolls(index),
+        };
+      }),
+    });
+    this.#currentFloorArchived = true;
+  }
+
   /** Players sorted by songs guessed, then fewest rerolls. */
   #rankedPlayers() {
     return [...this.players.values()].sort((a, b) =>
@@ -620,6 +705,7 @@ export class GameSession extends Emitter {
       floorReached: expedition.floorNumber,
       finished: expedition.finished,
       answerMode: this.#settings.answerMode,
+      floors: this.#floorReviews,
       durationMs: (expedition.finishedAt ?? Math.min(Date.now(), this.endsAt)) - this.startedAt,
       players: this.#rankedPlayers().map((player, rank) => ({
         rank: rank + 1,

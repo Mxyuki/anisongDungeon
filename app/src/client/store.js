@@ -5,8 +5,9 @@ import { Emitter } from '../core/emitter.js';
  * @property {'host' | 'join'} mode
  * @property {{status: 'idle'|'connecting'|'connected'|'closed'|'error', error: string}} connection
  * @property {string} roomCode            Last room code joined (prefilled after a disconnect).
- * @property {{error: string, pending: boolean} | null} rejoin  Set while the host asks for the
- *   name of the disconnected player this client was (mid-game join).
+ * @property {{error: string, pending: boolean, canJoin: boolean} | null} rejoin  Set while the
+ *   host asks for the name of the disconnected player this client was (mid-game join); canJoin:
+ *   the host allows joining as a new player (name + avatar).
  * @property {string | null} playerId
  * @property {boolean} isHost
  * @property {object | null} lobby          Server lobby view.

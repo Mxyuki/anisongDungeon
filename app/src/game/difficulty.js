@@ -1,56 +1,81 @@
 import {
-  DIFFICULTY_EASY_CENTER,
-  DIFFICULTY_HALF_WIDTH,
-  DIFFICULTY_HARD_CENTER,
+  DIFFICULTY_FIRST_FLOOR,
+  DIFFICULTY_LAST_FLOOR,
+  DIFFICULTY_LAST_FLOOR_IDEAL,
+  DIFFICULTY_MAX_DRIFT,
   DIFFICULTY_MIN_CANDIDATES,
 } from '../config.js';
 
 /** @typedef {import('./types.js').Song} Song */
-/** @typedef {import('../core/rng.js').Rng} Rng */
-
-const BAND_GROWTH = 1.5;
-const MAX_BAND = 100;
 
 /**
- * Difficulty in [0, 1] for a floor: 0 on floor 1, 1 on the last playable floor.
+ * Guess-rate band of a floor (% of players who know the song). Floor 1 uses
+ * DIFFICULTY_FIRST_FLOOR, the last floor DIFFICULTY_LAST_FLOOR (or its IDEAL part when enough
+ * songs fit), and the floors between move by equal steps.
+ * @typedef {{ min: number, max: number, ideal: { min: number, max: number } | null }} Band
+ */
+
+/**
  * @param {number} floor
- * @param {number} totalFloors  Floor number that ends the run.
- * @returns {number}
+ * @param {number} floorCount  Floors played (the last one leads to the summit).
+ * @returns {Band}
  */
-export function floorDifficulty(floor, totalFloors) {
-  const lastPlayable = totalFloors - 1;
-  if (lastPlayable <= 1) return 0;
-  return Math.min(1, Math.max(0, (floor - 1) / (lastPlayable - 1)));
+export function floorBand(floor, floorCount) {
+  const progress = floorCount <= 1 ? 0 : Math.min(1, Math.max(0, (floor - 1) / (floorCount - 1)));
+  const lerp = (from, to) => from + (to - from) * progress;
+  return {
+    min: lerp(DIFFICULTY_FIRST_FLOOR.min, DIFFICULTY_LAST_FLOOR.min),
+    max: lerp(DIFFICULTY_FIRST_FLOOR.max, DIFFICULTY_LAST_FLOOR.max),
+    ideal: progress === 1 && floorCount > 1 ? DIFFICULTY_LAST_FLOOR_IDEAL : null,
+  };
 }
 
 /**
- * Guess rate (0-100) the song picker aims for at a given difficulty.
- * @param {number} difficulty
+ * How far a song's guess rate is outside a band (0 inside).
+ * @param {Song} song
+ * @param {{ min: number, max: number }} band
  * @returns {number}
  */
-export function targetGuessRate(difficulty) {
-  return DIFFICULTY_EASY_CENTER + (DIFFICULTY_HARD_CENTER - DIFFICULTY_EASY_CENTER) * difficulty;
+export function bandDistance(song, band) {
+  if (song.guessRate < band.min) return band.min - song.guessRate;
+  if (song.guessRate > band.max) return song.guessRate - band.max;
+  return 0;
 }
 
 /**
- * Picks a song close to the target guess rate, preferring songs the player has not heard.
- * The acceptance band widens until enough candidates exist.
- * @param {object} options
- * @param {Rng} options.rng
- * @param {Song[]} options.candidates
- * @param {number} options.difficulty
- * @param {Set<number>} [options.excludeIds]
- * @returns {Song | null}
+ * The songs closest to a band: every song inside it, or (too few inside) the
+ * DIFFICULTY_MIN_CANDIDATES nearest ones, ties included.
  */
-export function pickSong({ rng, candidates, difficulty, excludeIds = new Set() }) {
-  const fresh = candidates.filter((song) => !excludeIds.has(song.id));
-  const pool = fresh.length > 0 ? fresh : candidates;
-  if (pool.length === 0) return null;
+function closest(songs, band) {
+  if (songs.length === 0) return [];
+  const sorted = [...songs].sort((a, b) => bandDistance(a, band) - bandDistance(b, band));
+  const limit = bandDistance(sorted[Math.min(DIFFICULTY_MIN_CANDIDATES, sorted.length) - 1], band);
+  return sorted.filter((song) => bandDistance(song, band) <= limit);
+}
 
-  const target = targetGuessRate(difficulty);
-  for (let width = DIFFICULTY_HALF_WIDTH; width < MAX_BAND; width *= BAND_GROWTH) {
-    const inBand = pool.filter((song) => Math.abs(song.guessRate - target) <= width);
-    if (inBand.length >= DIFFICULTY_MIN_CANDIDATES) return rng.pick(inBand);
+/**
+ * Songs a tile of this floor may play, by difficulty first: the closest to the band, never a
+ * random one. Among them, songs played the fewest times this game come first, unless that would
+ * drift more than DIFFICULTY_MAX_DRIFT out of the band (then a repeat that fits wins).
+ * @param {Song[]} songs
+ * @param {Band} band
+ * @param {(song: Song) => number} playCount  Times the song was played this game.
+ * @returns {Song[]}
+ */
+export function songsForBand(songs, band, playCount = () => 0) {
+  if (songs.length === 0) return [];
+  let fewest = Infinity;
+  for (const song of songs) fewest = Math.min(fewest, playCount(song));
+  const freshest = songs.filter((song) => playCount(song) === fewest);
+
+  if (band.ideal) {
+    const ideal = freshest.filter((song) => bandDistance(song, band.ideal) === 0);
+    if (ideal.length >= DIFFICULTY_MIN_CANDIDATES) return ideal;
   }
-  return rng.pick(pool);
+  const near = closest(freshest, band);
+  if (near.every((song) => bandDistance(song, band) <= DIFFICULTY_MAX_DRIFT)) return near;
+  // The fresh songs are all far from the band: repeat the least played of the closest ones.
+  const closestAll = closest(songs, band);
+  const least = Math.min(...closestAll.map(playCount));
+  return closestAll.filter((song) => playCount(song) === least);
 }

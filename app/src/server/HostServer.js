@@ -30,6 +30,7 @@ import { GameSession } from './GameSession.js';
  * @property {string} anilist
  * @property {string[]} statuses   List statuses (LIST_STATUSES keys) the player plays from.
  * @property {{state: 'none'|'checking'|'ok'|'error', count: number, error: string}} anilistStatus
+ * @property {boolean} anilistEnabled  False when the host left this player's list out of the pool.
  * @property {string} avatar       Avatar id ('' = colored dot).
  * @property {number} color        Fallback dot color index.
  * @property {boolean} ready
@@ -47,6 +48,8 @@ export class HostServer {
   /** @type {Map<Connection, string>} */ #playerIdByConnection = new Map();
   /** @type {Map<Connection, string>} Mid-game newcomers asked for their name → their token. */
   #pendingRejoins = new Map();
+  /** @type {Set<string>} Tokens of kicked players: refused for the rest of this room's life. */
+  #kickedTokens = new Set();
   /** @type {Map<Connection, (alive: boolean) => void>} Pending liveness checks. */
   #probes = new Map();
   /** @type {Map<string, Promise<import('../data/anilist.js').ListEntry[]>>} By lowercase user. */
@@ -93,6 +96,8 @@ export class HostServer {
       [MSG.REROLL]: this.#onReroll,
       [MSG.ENTER_DOOR]: this.#onEnterDoor,
       [MSG.RETURN_TO_LOBBY]: this.#onReturnToLobby,
+      [MSG.KICK]: this.#onKick,
+      [MSG.SET_ANILIST]: this.#onSetAniList,
     };
   }
 
@@ -147,6 +152,10 @@ export class HostServer {
       return;
     }
     const token = cleanString(message.token, 64);
+    if (token && this.#kickedTokens.has(token)) {
+      this.#reject(connection, 'The host removed you from this room.');
+      return;
+    }
     const returning = token && [...this.#players.values()].find((p) => p.token === token);
     if (returning && !returning.isHost) {
       this.#reclaim(returning, connection, token);
@@ -155,7 +164,8 @@ export class HostServer {
     if (this.#phase !== PHASE.LOBBY) {
       // Lost players come back from a new tab or device: they prove who they are by name.
       this.#pendingRejoins.set(connection, token);
-      connection.send({ type: MSG.REJOIN_PROMPT, error: '' });
+      connection.send({ type: MSG.AVATARS, avatars: this.#avatars }); // for the late-join picker
+      this.#sendRejoinPrompt(connection, '');
       return;
     }
     if (this.#players.size >= MAX_PLAYERS) {
@@ -168,22 +178,60 @@ export class HostServer {
     this.#bind(player, connection);
   }
 
+  /** Newcomers may join the running game as new players (host setting). */
+  #canLateJoin() {
+    return this.#phase === PHASE.PLAYING && this.#settings.lateJoin && this.#session !== null;
+  }
+
+  #sendRejoinPrompt(connection, error) {
+    connection.send({ type: MSG.REJOIN_PROMPT, error, canJoin: this.#canLateJoin() });
+  }
+
   /**
-   * Mid-game: a newcomer names the disconnected player they were.
+   * Mid-game: a newcomer names the disconnected player they were, or (late join allowed) picks a
+   * name and avatar to join as a new player. Late joiners have no AniList: the pool stays the
+   * same, so the tower is the one the game started with.
    * @param {Connection} connection
-   * @param {{ name?: unknown }} message
+   * @param {{ name?: unknown, avatar?: unknown }} message
    */
   #onRejoin(connection, message) {
     if (!this.#pendingRejoins.has(connection) || this.#phase === PHASE.LOBBY) return;
-    const name = normalizeText(cleanString(message.name, NAME_MAX_LENGTH));
-    const player = name && [...this.#players.values()]
-      .find((p) => !p.isHost && normalizeText(p.name) === name
-        && (!this.#session || this.#session.players.has(p.id)));
-    if (!player) {
-      connection.send({ type: MSG.REJOIN_PROMPT, error: 'Nobody with this name played in this game.' });
+    const typed = cleanString(message.name, NAME_MAX_LENGTH);
+    const name = normalizeText(typed);
+    if (!name) {
+      this.#sendRejoinPrompt(connection, 'Type a name first.');
       return;
     }
-    this.#reclaim(player, connection, this.#pendingRejoins.get(connection));
+    const sameName = [...this.#players.values()].filter((p) => normalizeText(p.name) === name);
+    const player = sameName.find((p) => !p.isHost && (!this.#session || this.#session.players.has(p.id)));
+    if (player) {
+      this.#reclaim(player, connection, this.#pendingRejoins.get(connection));
+      return;
+    }
+    if (!this.#canLateJoin()) {
+      this.#sendRejoinPrompt(connection, 'Nobody with this name played in this game.');
+      return;
+    }
+    if (sameName.length > 0) {
+      this.#sendRejoinPrompt(connection, 'This name is already taken.');
+      return;
+    }
+    if (this.#players.size >= MAX_PLAYERS) {
+      this.#sendRejoinPrompt(connection, `The room is full (${MAX_PLAYERS} players).`);
+      return;
+    }
+    this.#lateJoin(connection, typed, message.avatar);
+  }
+
+  /** Adds a newcomer to the running game, at the entrance of the current floor. */
+  #lateJoin(connection, name, avatar) {
+    const token = this.#pendingRejoins.get(connection);
+    this.#pendingRejoins.delete(connection);
+    const player = this.#createPlayer(token, false, { name, avatar });
+    player.ready = true;
+    this.#players.set(player.id, player);
+    this.#session.addPlayer(player);
+    this.#bind(player, connection, { joined: true });
   }
 
   /**
@@ -235,6 +283,7 @@ export class HostServer {
       anilist: cleanString(message.anilist, ANILIST_NAME_MAX_LENGTH),
       statuses: this.#cleanStatuses(message.statuses),
       anilistStatus: { state: 'none', count: 0, error: '' },
+      anilistEnabled: true,
       avatar: this.#cleanAvatar(message.avatar),
       color: (number - 1) % PLAYER_COLOR_COUNT,
       ready: isHost,
@@ -244,7 +293,12 @@ export class HostServer {
     };
   }
 
-  #bind(player, connection) {
+  /**
+   * @param {PlayerRecord} player
+   * @param {Connection} connection
+   * @param {{ joined?: boolean }} [options]  joined: a late joiner (announced as new, not back).
+   */
+  #bind(player, connection, { joined = false } = {}) {
     player.connection = connection;
     player.online = true;
     this.#playerIdByConnection.set(connection, player.id);
@@ -255,7 +309,8 @@ export class HostServer {
       this.#session?.setOnline(player.id, true);
       this.#sendGameState(player);
       for (const other of this.#players.values()) {
-        if (other !== player) this.#notice(other, `${player.name} reconnected.`, 'info');
+        const news = joined ? 'joined the expedition' : 'reconnected';
+        if (other !== player) this.#notice(other, `${player.name} ${news}.`, 'info');
       }
       this.#broadcast({ type: MSG.LEADERBOARD, entries: this.#leaderboard() });
     }
@@ -310,6 +365,7 @@ export class HostServer {
         anilist: player.anilist,
         statuses: [...player.statuses],
         anilistStatus: { ...player.anilistStatus },
+        anilistEnabled: player.anilistEnabled,
         avatar: player.avatar,
         color: player.color,
         ready: player.ready,
@@ -381,6 +437,32 @@ export class HostServer {
     this.#broadcastLobby();
   }
 
+  /** Host only, lobby: removes a player; their tab cannot come back to this room. */
+  #onKick(player, message) {
+    if (this.#phase !== PHASE.LOBBY || !player.isHost) return;
+    const target = this.#players.get(message.playerId);
+    if (!target || target.isHost) return;
+    if (target.token) this.#kickedTokens.add(target.token);
+    this.#players.delete(target.id);
+    if (target.connection) {
+      this.#playerIdByConnection.delete(target.connection);
+      this.#reject(target.connection, 'The host removed you from this room.');
+    }
+    for (const other of this.#players.values()) {
+      this.#notice(other, `${target.name} was removed by the host.`, 'info');
+    }
+    this.#broadcastLobby();
+  }
+
+  /** Host only, lobby: includes or leaves out one player's AniList in the song pool. */
+  #onSetAniList(player, message) {
+    if (this.#phase !== PHASE.LOBBY || !player.isHost) return;
+    const target = this.#players.get(message.playerId);
+    if (!target || typeof message.enabled !== 'boolean') return;
+    target.anilistEnabled = message.enabled;
+    this.#broadcastLobby();
+  }
+
   #onReady(player, message) {
     if (this.#phase !== PHASE.LOBBY || player.isHost) return;
     player.ready = Boolean(message.ready);
@@ -449,7 +531,7 @@ export class HostServer {
    * with the same song types and seasons), both limited by the settings.
    */
   async #buildPools() {
-    const players = [...this.#players.values()].filter((p) => p.online && p.anilist);
+    const players = [...this.#players.values()].filter((p) => p.online && p.anilist && p.anilistEnabled);
     const lists = await Promise.allSettled(players.map((p) => this.#playerListIds(p)));
     const aniListIds = [...new Set(lists.flatMap((r) => (r.status === 'fulfilled' ? r.value : [])))];
 
@@ -471,8 +553,9 @@ export class HostServer {
       tagCount: pool.eligibleTags().length,
     };
 
+    // Late joiners are added to the session later: look the players up on every event.
     this.#session.on('floor', () => {
-      for (const player of players) this.#sendRun(player.id);
+      for (const player of this.#inGame()) this.#sendRun(player.id);
     });
     this.#session.on('player', (playerId) => this.#sendRun(playerId));
     this.#session.on('positions', () => this.#broadcastPositions());
@@ -480,7 +563,7 @@ export class HostServer {
       this.#send(playerId, { type: MSG.CHALLENGE_RESULT, result });
     });
     this.#session.on('announce', (message) => {
-      for (const player of players) this.#notice(player, message, 'info');
+      for (const player of this.#inGame()) this.#notice(player, message, 'info');
     });
     this.#session.on('leaderboard', () => {
       this.#broadcast({ type: MSG.LEADERBOARD, entries: this.#leaderboard() });
@@ -491,6 +574,11 @@ export class HostServer {
     this.#session.start();
     this.#broadcastLobby();
     for (const player of players) this.#sendGameState(player);
+  }
+
+  /** Room members who play in the current session. */
+  #inGame() {
+    return [...this.#players.values()].filter((p) => this.#session?.players.has(p.id));
   }
 
   #broadcastPositions() {

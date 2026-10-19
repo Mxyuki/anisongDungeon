@@ -3,7 +3,7 @@
  * Bump PROTOCOL_VERSION whenever a message shape changes.
  */
 
-export const PROTOCOL_VERSION = 7;
+export const PROTOCOL_VERSION = 8;
 
 export const MSG = Object.freeze({
   // client → server
@@ -19,7 +19,14 @@ export const MSG = Object.freeze({
   /** Votes for a door (clicking the voted door again withdraws the vote). */
   ENTER_DOOR: 'door:enter',
   RETURN_TO_LOBBY: 'lobby:return',
-  /** Mid-game join from a new tab/device: claims a disconnected player by name. */
+  /** Host only, lobby: removes a player from the room. */
+  KICK: 'player:kick',
+  /** Host only, lobby: includes or leaves out one player's AniList in the song pool. */
+  SET_ANILIST: 'player:anilist',
+  /**
+   * Mid-game join from a new tab/device: `{ name, avatar }`. Claims the disconnected player with
+   * that name, or joins as a new player when the host allows late joins.
+   */
   REJOIN: 'rejoin',
   PONG: 'pong',
 
@@ -37,7 +44,10 @@ export const MSG = Object.freeze({
   LEADERBOARD: 'leaderboard',
   GAME_END: 'game:end',
   NOTICE: 'notice',
-  /** A game is running and this client is unknown: ask for the name of a disconnected player. */
+  /**
+   * A game is running and this client is unknown: `{ error, canJoin }`. Ask for the name of a
+   * disconnected player, or (canJoin) a name and avatar to join as a new player.
+   */
   REJOIN_PROMPT: 'rejoin:prompt',
   /** Liveness check of a connection someone tries to take over. */
   PING: 'ping',

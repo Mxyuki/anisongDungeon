@@ -173,12 +173,33 @@ export class GameClient extends Emitter {
   }
 
   /**
-   * Mid-game join: claims the slot of the disconnected player with this name.
+   * Mid-game join: claims the slot of the disconnected player with this name, or joins as a new
+   * player when the host allows late joins (then `avatar` is used).
    * @param {string} name
+   * @param {string} [avatar]
    */
-  rejoin(name) {
-    this.#store.set({ rejoin: { error: '', pending: true } });
-    this.#send({ type: MSG.REJOIN, name });
+  rejoin(name, avatar = '') {
+    const canJoin = Boolean(this.#store.state.rejoin?.canJoin);
+    this.#store.set({ rejoin: { error: '', pending: true, canJoin } });
+    if (canJoin) this.setProfile({ name, avatar }); // remembered for next time (sent once joined)
+    this.#send({ type: MSG.REJOIN, name, avatar });
+  }
+
+  /**
+   * Host, lobby: removes a player from the room.
+   * @param {string} playerId
+   */
+  kick(playerId) {
+    this.#send({ type: MSG.KICK, playerId });
+  }
+
+  /**
+   * Host, lobby: includes or leaves out a player's AniList in the song pool.
+   * @param {string} playerId
+   * @param {boolean} enabled
+   */
+  setPlayerAniList(playerId, enabled) {
+    this.#send({ type: MSG.SET_ANILIST, playerId, enabled });
   }
 
   // ------------------------------------------------------------------ server messages
@@ -192,8 +213,10 @@ export class GameClient extends Emitter {
     [MSG.WELCOME]: ({ playerId, isHost }) => {
       this.#store.set({ playerId, isHost, connection: { status: 'connected', error: '' }, rejoin: null });
     },
-    [MSG.REJOIN_PROMPT]: ({ error }) => {
-      this.#store.set({ rejoin: { error: typeof error === 'string' ? error : '', pending: false } });
+    [MSG.REJOIN_PROMPT]: ({ error, canJoin }) => {
+      this.#store.set({
+        rejoin: { error: typeof error === 'string' ? error : '', pending: false, canJoin: Boolean(canJoin) },
+      });
     },
     [MSG.PING]: () => this.#send({ type: MSG.PONG }),
     [MSG.AVATARS]: ({ avatars }) => this.#store.set({ avatars }),
